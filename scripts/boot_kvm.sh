@@ -1,13 +1,25 @@
 #!/bin/bash
-# Boot the guest VM with KVM acceleration
-# Used for: setup, warmup, fast-forwarding to ROI
+# Boot the guest VM with KVM — 7 vCPUs
+# vCPU 0-3: Memcached worker threads
+# vCPU 4-6:   YCSB + OS housekeeping
 
 IMGDIR="$HOME/qemu-tracing/images"
 
-qemu-system-x86_64 \
+/home/rahbera/qemu-custom/bin/qemu-system-x86_64 \
     -accel kvm \
-    -cpu host \
-    -smp 4 \
+    -cpu qemu64,\
+kvmclock=off,\
+kvmclock-stable-bit=off,\
+kvm-asyncpf=off,\
+kvm-steal-time=off,\
+kvm-pv-eoi=off,\
+kvm-pv-unhalt=off,\
+kvm-poll-control=off,\
+kvm-pv-ipi=off,\
+kvm-pv-sched-yield=off,\
+kvm-pv-tlb-flush=off,\
+kvm-asyncpf-int=off \
+    -smp 7 \
     -m 12G \
     -drive file=${IMGDIR}/ubuntu-guest.qcow2,format=qcow2,if=virtio \
     -nic user,model=virtio-net-pci,hostfwd=tcp::2222-:22,hostfwd=tcp::11211-:11211 \
