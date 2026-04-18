@@ -1,0 +1,37 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(grep -n \"NUM_INSTR\" /home/rahbera/arishem/champsim/inc/*.h)",
+      "Bash(zstd -d)",
+      "Bash(xxd)",
+      "Read(//tmp/**)",
+      "Bash(dpkg -l)",
+      "Bash(ldconfig -p)",
+      "Read(//usr/**)",
+      "Bash(pkg-config --exists zydis)",
+      "Bash(converter/raw2champsim -v dump/bmk_run8/trace_vcpu0.raw.zst)",
+      "Bash(~/qemu-tracing/plugin/trace_inspector dump/bmk_run8/trace_vcpu0.raw.zst)",
+      "Bash(plugin/trace_inspector -n 50000000 dump/bmk_run8/trace_vcpu0.raw.zst)",
+      "Bash(zstd -dc dump/bmk_run8/trace_vcpu0.champsim.zst)",
+      "Bash(converter/raw2champsim -v -n 10000000 dump/bmk_run8/trace_vcpu1.raw.zst dump/bmk_run8/trace_vcpu1.champsim.zst)",
+      "Bash(ls Makefile build*.sh)",
+      "Bash(head -30 Makefile)",
+      "Bash(./build_champsim.sh no:*)",
+      "Bash(converter/raw2champsim -v -n 3000000 dump/bmk_run8/trace_vcpu1.raw.zst /tmp/test_heartbeat.champsim.zst)",
+      "Bash(pkg-config --cflags --libs libzstd)",
+      "Bash(make clean:*)",
+      "Bash(make)",
+      "Bash(make -n distclean)",
+      "Bash(make --dry-run)",
+      "Bash(ldd ~/qemu-tracing/plugin/champsim_tracer.so)",
+      "Bash(nm ~/qemu-tracing/plugin/champsim_tracer.so)"
+    ],
+    "additionalDirectories": [
+      "/home/rahbera/qemu-tracing/champsim/inc",
+      "/home/rahbera/arishem/champsim/inc",
+      "/home/rahbera/qemu-tracing/champsim/src",
+      "/home/rahbera/arishem/champsim/src",
+      "/tmp"
+    ]
+  }
+}

@@ -1,0 +1,26 @@
+# VM images and snapshots (large binary files)
+images/
+snapshots/
+
+# Raw and converted trace data
+dump/
+traces/
+
+# Built binaries
+plugin/champsim_tracer.so
+plugin/trace_inspector
+converter/raw2champsim
+
+# Zydis (fetched by converter/Makefile)
+converter/zydis/
+
+# ChampSim build artifacts
+champsim/obj/
+champsim/bin/
+
+# Editor / IDE
+*.swp
+*.swo
+*~
+.vscode/
+.idea/

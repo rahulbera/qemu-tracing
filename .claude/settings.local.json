@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(make install:*)",
+      "Bash(~/qemu-custom/bin/qemu-img snapshot:*)",
+      "Bash(python3)"
+    ]
+  }
+}
