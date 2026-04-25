@@ -23,4 +23,5 @@ champsim/bin/
 *.swo
 *~
 .vscode/
+.claude/
 .idea/

@@ -28,9 +28,8 @@ echo "  QEMU TCG Tracing Run"
 echo "=========================================="
 echo "  QEMU:        ${QEMUDIR}/qemu-system-x86_64"
 echo "  Mode:        TCG (software emulation)"
-echo "  Snapshot:    roi_ready"
 echo "  Plugin:      champsim_tracer.so"
-echo "  Tracing:     vCPUs 0-3"
+echo "  Tracing:     vCPUs 1-4"
 echo "  Checkpoint:  ${CKPTNAME}"
 echo "  Limit:       ${LIMIT} instructions/vCPU"
 echo "  Output:      ${TRACEDIR}/"
@@ -50,7 +49,7 @@ ${QEMUDIR}/qemu-system-x86_64 \
     -nographic \
     -serial mon:stdio \
     -monitor telnet:127.0.0.1:4444,server,nowait \
-    -plugin ${PLUGINDIR}/champsim_tracer.so,outdir=${TRACEDIR},vcpus=0-3,limit=${LIMIT} \
+    -plugin ${PLUGINDIR}/champsim_tracer.so,outdir=${TRACEDIR},vcpus=1-4,limit=${LIMIT},trigger=/tmp/trace_start \
     -loadvm ${CKPTNAME}
 
 echo ""

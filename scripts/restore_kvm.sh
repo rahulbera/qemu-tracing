@@ -26,4 +26,4 @@ kvm-asyncpf-int=off \
     -nographic \
     -serial mon:stdio \
     -monitor telnet:127.0.0.1:4444,server,nowait \
-    -loadvm roi_ready
+    -loadvm $1
