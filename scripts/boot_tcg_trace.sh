@@ -4,13 +4,13 @@
 # Restores from the roi_ready snapshot.
 #
 # Usage:
-#   ./boot_tcg_trace.sh [instruction_limit]
+#   ./boot_tcg_trace.sh [instruction_limit] [checkpoint_name]
 #
 # Examples:
-#   ./boot_tcg_trace.sh 1000000      # 1M instructions per vCPU (test)
-#   ./boot_tcg_trace.sh 200000000    # 200M instructions per vCPU
-#   ./boot_tcg_trace.sh 0            # unlimited (run until VM shutdown)
-#   ./boot_tcg_trace.sh              # default: 1M instructions (test)
+#   ./boot_tcg_trace.sh 1000000 scylla_run    # 1M instructions per vCPU (test)
+#   ./boot_tcg_trace.sh 200000000 scylla_run  # 200M instructions per vCPU
+#   ./boot_tcg_trace.sh 0 scylla_run          # unlimited (run until VM shutdown)
+#   ./boot_tcg_trace.sh                       # default: 1M instructions (test)
 #
 
 LIMIT="${1:-1000000}"
@@ -41,11 +41,16 @@ echo ""
 
 ${QEMUDIR}/qemu-system-x86_64 \
     -accel tcg,thread=multi \
-    -cpu qemu64 \
+    -cpu Haswell,\
+hle=off,\
+rtm=off,\
+pcid=off,\
+invpcid=off,\
+tsc-deadline=off \
     -smp 7 \
     -m 12G \
     -drive file=${IMGDIR}/ubuntu-guest.qcow2,format=qcow2,if=virtio \
-    -nic user,model=virtio-net-pci,hostfwd=tcp::2222-:22,hostfwd=tcp::11211-:11211 \
+    -nic user,model=virtio-net-pci,hostfwd=tcp::2222-:22,hostfwd=tcp::9042-:9042 \
     -nographic \
     -serial mon:stdio \
     -monitor telnet:127.0.0.1:4444,server,nowait \
