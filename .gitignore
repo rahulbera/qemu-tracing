@@ -1,14 +1,19 @@
 # VM images and snapshots (large binary files)
-images/
-snapshots/
+# images/ and traces/ are typically symlinks to a large-disk location;
+# without the trailing slash the pattern ignores both directories and symlinks.
+images
+snapshots/*
+!snapshots/README.md
 
 # Raw and converted trace data
-dump/
-traces/
+dump/*
+!dump/README.md
+traces
 
 # Built binaries
 plugin/champsim_tracer.so
 plugin/trace_inspector
+plugin/trace_filter
 converter/raw2champsim
 
 # Zydis (fetched by converter/Makefile)

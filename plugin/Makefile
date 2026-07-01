@@ -11,6 +11,7 @@
 #   make QEMU_PREFIX=~/qemu-9.2.4/build      # or a QEMU build directory
 #   make plugin                              # build only the TCG plugin
 #   make inspector                           # build only the trace inspector
+#   make filter                              # build only the trace filter
 #   make clean
 
 CC      ?= gcc
@@ -24,6 +25,7 @@ QEMU_PREFIX ?= $(HOME)/qemu-custom
 # Targets
 PLUGIN    = champsim_tracer.so
 INSPECTOR = trace_inspector
+FILTER    = trace_filter
 
 # pkg-config flags
 GLIB_CFLAGS  := $(shell pkg-config --cflags glib-2.0 2>/dev/null)
@@ -41,13 +43,15 @@ QEMU_PLUGIN_INC := $(shell \
 
 # ─────────────────────────────────────────────
 
-.PHONY: all plugin inspector clean check-deps
+.PHONY: all plugin inspector filter clean check-deps
 
-all: check-deps plugin inspector
+all: check-deps plugin inspector filter
 
 plugin: check-deps $(PLUGIN)
 
 inspector: check-deps $(INSPECTOR)
+
+filter: check-deps $(FILTER)
 
 $(PLUGIN): champsim_tracer.c
 	@if [ -z "$(QEMU_PLUGIN_INC)" ]; then \
@@ -71,6 +75,10 @@ $(INSPECTOR): trace_inspector.c
 	$(CC) $(CFLAGS) $(ZSTD_CFLAGS) -o $@ $< $(ZSTD_LDFLAGS)
 	@echo "Built: $@"
 
+$(FILTER): trace_filter.c
+	$(CC) $(CFLAGS) $(ZSTD_CFLAGS) -o $@ $< $(ZSTD_LDFLAGS)
+	@echo "Built: $@"
+
 check-deps:
 	@pkg-config --exists glib-2.0 2>/dev/null || \
 		(echo "ERROR: glib-2.0 not found. Install: sudo apt install libglib2.0-dev" && exit 1)
@@ -78,4 +86,4 @@ check-deps:
 		(echo "ERROR: libzstd not found. Install: sudo apt install libzstd-dev" && exit 1)
 
 clean:
-	rm -f $(PLUGIN) $(INSPECTOR)
+	rm -f $(PLUGIN) $(INSPECTOR) $(FILTER)
