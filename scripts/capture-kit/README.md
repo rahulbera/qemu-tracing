@@ -129,24 +129,53 @@ either check fails (upgrade QEMU; `cd plugin && ./build_plugin.sh
 <qemu-src>`).
 
 **Now edit the generated `run_trace.sh`.** Near the bottom of the QEMU
-invocation there is a clearly marked block:
+invocation, immediately after the `"${LOADVM[@]}" \` line, you'll find
+this verbatim (quoted from `configure_tracer.sh`'s template):
 
 ```
-# ─── YOUR BOOT FLAGS GO HERE (replace this comment block) ────────
+    "${LOADVM[@]}" \
+    #
+    # ─── YOUR BOOT FLAGS GO HERE (replace this comment block) ────────
+    # Add your usual -cpu, -drive, pflash firmware, -nic, cloud-init
+    # seed, etc. — everything you normally boot this guest with, minus
+    # any -accel/-machine/-smp/-m flags (all four are already set above —
+    # -smp/-m via the SMP=/MEM= variables near the top of this script,
+    # -accel/-machine inline; -cpu note: TCG cannot use 'host'; use a
+    # named model, e.g. -cpu cortex-a76).
+    # ─────────────────────────────────────────────────────────────────
 ```
 
-Replace that comment block with everything you normally boot this
-guest with — `-cpu`, `-drive`/pflash firmware, `-nic`, cloud-init seed,
-etc. Do **not** add `-accel`, `-machine`, `-smp`, or `-m`: all four are
-already set by the template — `-machine virt -accel tcg,thread=multi`
-inline, plus `-smp "$SMP" -m "$MEM"`, where `SMP=4` and `MEM=4G` are
-ordinary shell variables near the top of the generated script, right
-next to `SNAPSHOT=`. If your guest normally boots with a different vCPU
-count or RAM size, edit those two variables there — don't paste a
-second `-smp`/`-m` into the boot-flags block below (QEMU accepts
-duplicate `-smp`/`-m` flags silently, last one wins, and you'll end up
-tracing the wrong vCPU count without any error telling you so). One
-hard constraint: **`-cpu host` will not work under TCG** — TCG cannot
+**Replace everything from the bare `#` line through the end of the
+comment block** (all eight lines shown above, starting with the bare
+`#` immediately under `"${LOADVM[@]}" \` and ending at the closing
+`# ───...` separator) **with your boot flags.** That bare `#` line is
+easy to miss — it has no marker text, so it looks like leftover
+whitespace rather than part of the block — but it's exactly what
+terminates the QEMU command via shell backslash-continuation. If you
+leave it in place and only replace the decorated
+`# ─── YOUR BOOT FLAGS GO HERE ...` lines underneath it, your pasted
+flags become detached shell comments *after* the command has already
+ended, and QEMU launches with none of them.
+
+Keep the **trailing backslash on the `"${LOADVM[@]}" \` line intact** —
+that's what continues the command into whatever you paste in its
+place. Give each of your own flag lines a trailing ` \` too so the
+command keeps continuing, except the very last one (no trailing
+backslash on the final line, since it's the end of the script and
+nothing follows it).
+
+Add `-cpu`, `-drive`/pflash firmware, `-nic`, cloud-init seed, etc. —
+everything you normally boot this guest with. Do **not** add `-accel`,
+`-machine`, `-smp`, or `-m`: all four are already set by the template —
+`-machine virt -accel tcg,thread=multi` inline, plus
+`-smp "$SMP" -m "$MEM"`, where `SMP=4` and `MEM=4G` are ordinary shell
+variables near the top of the generated script, right next to
+`SNAPSHOT=`. If your guest normally boots with a different vCPU count
+or RAM size, edit those two variables there — don't paste a second
+`-smp`/`-m` into the boot-flags block below (QEMU accepts duplicate
+`-smp`/`-m` flags silently, last one wins, and you'll end up tracing
+the wrong vCPU count without any error telling you so). One hard
+constraint: **`-cpu host` will not work under TCG** — TCG cannot
 emulate a passthrough host CPU, so you need a named model (e.g.
 `-cpu cortex-a76`, `-cpu max`). This matters most for the two-phase
 flow below, where the same `-cpu` has to work under both KVM and TCG.

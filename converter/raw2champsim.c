@@ -736,6 +736,7 @@ int main(int argc, char **argv)
   ZydisDecoderInit(&decoder, ZYDIS_MACHINE_MODE_LONG_64, ZYDIS_STACK_WIDTH_64);
 
   ConvertStats stats = {0};
+  int          exit_status = 0; /* set to 1 on any truncated/corrupt record */
 
   /* We need to look ahead one instruction to determine branch_taken.
    * Strategy: decode current instruction, but defer writing until we
@@ -760,11 +761,13 @@ int main(int argc, char **argv)
     if (isz == 0 || isz > MAX_INSN_SIZE) {
       fprintf(stderr, "ERROR at insn #%" PRIu64 ": invalid instr_size=%u\n",
               stats.total_insns, isz);
+      exit_status = 1;
       break;
     }
     if (nmem > MAX_MEM_OPS) {
       fprintf(stderr, "ERROR at insn #%" PRIu64 ": invalid num_mem_ops=%u\n",
               stats.total_insns, nmem);
+      exit_status = 1;
       break;
     }
 
@@ -773,6 +776,7 @@ int main(int argc, char **argv)
     if (!reader_read_exact(reader, &ip, 8)) {
       fprintf(stderr, "ERROR: truncated record (IP) at insn #%" PRIu64 "\n",
               stats.total_insns);
+      exit_status = 1;
       break;
     }
 
@@ -781,6 +785,7 @@ int main(int argc, char **argv)
     if (!reader_read_exact(reader, insn_bytes, isz)) {
       fprintf(stderr, "ERROR: truncated record (bytes) at insn #%" PRIu64 "\n",
               stats.total_insns);
+      exit_status = 1;
       break;
     }
 
@@ -815,6 +820,7 @@ int main(int argc, char **argv)
       trunc_memop:
         fprintf(stderr, "ERROR: truncated mem op at insn #%" PRIu64 "\n",
                 stats.total_insns);
+        exit_status = 1;
         goto done;
       }
 
@@ -829,6 +835,7 @@ int main(int argc, char **argv)
                 "ERROR: corrupt file — has_value set but header "
                 "has_values=0 (insn #%" PRIu64 ")\n",
                 stats.total_insns);
+        exit_status = 1;
         goto done;
       }
 
@@ -838,6 +845,7 @@ int main(int argc, char **argv)
         if (!reader_read_exact(reader, mem_ops[m].value, vbytes)) {
           fprintf(stderr, "ERROR: truncated value at insn #%" PRIu64 "\n",
                   stats.total_insns);
+          exit_status = 1;
           goto done;
         }
         mem_ops[m].value_len = vbytes;
@@ -857,6 +865,7 @@ int main(int argc, char **argv)
       /* Write previous record */
       if (!writer_write(writer, &prev_record, sizeof(prev_record))) {
         fprintf(stderr, "ERROR: write failed\n");
+        exit_status = 1;
         goto done;
       }
     }
@@ -1100,5 +1109,5 @@ done:
            ratio, (double)compressed_size / stats.total_insns);
   }
 
-  return 0;
+  return exit_status;
 }

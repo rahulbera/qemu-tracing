@@ -530,11 +530,14 @@ int main(int argc, char **argv)
     return 1;
   }
 
-  uint8_t arch        = 0;
-  bool    file_has_pa = false;
+  uint8_t arch            = 0;
+  bool    file_has_pa     = false;
+  bool    file_has_values = true; /* v2 has no has_values flag; values were
+                                      always on */
   if (version == 3) {
-    arch        = file_hdr[12];
-    file_has_pa = (file_hdr[13] & 0x1) != 0;
+    arch            = file_hdr[12];
+    file_has_pa     = (file_hdr[13] & 0x1) != 0;
+    file_has_values = (file_hdr[13] & 0x2) != 0;
     if (arch == 1) {
       fprintf(stderr,
               "ERROR: arch=aarch64 — idle-loop filtering for AArch64 is not "
@@ -671,6 +674,14 @@ int main(int argc, char **argv)
       uint8_t mflags = mhdr[mlen - 1];
       memcpy(rec_buf + rec_pos, mhdr, mlen);
       rec_pos += mlen;
+
+      if ((mflags & 0x2) && !file_has_values) {
+        fprintf(stderr,
+                "ERROR: corrupt file — mem op sets has_value but header "
+                "has_values=0 (insn #%" PRIu64 ")\n",
+                in_total);
+        exit(1);
+      }
 
       if (mflags & 0x2) {
         uint8_t vbytes = (msize <= MAX_VALUE_SIZE) ? msize : MAX_VALUE_SIZE;

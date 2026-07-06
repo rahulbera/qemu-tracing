@@ -259,15 +259,19 @@ callback can fire (multi-threaded TCG races out lazy init).
 
 - `MAX_VALUE_SIZE` 16 → 64 (line 91) — buffer/format ceiling only, per
   the extraction-guard rule above.
-- `STAGING_BUF_SIZE` 512 → 1024 (line 94), **plus a hard-stop bounds
-  check** in `finalize_pending_insn` (lines 316–367), which currently
-  has none. The v3 format-ceiling worst case is
-  4 + 8 + 15 + 7×(8+8+1+1+64) = **601 bytes > 512**. With today's
-  `VALUE_API_CAP = 16` the real worst case is 265 bytes, so the
-  overflow cannot fire yet — it materializes the day `value_cap` grows
-  past 16 (or if someone raises the cap without the buffer). Growing
-  the buffer and adding the assert now, while we are staring at it, is
-  the point.
+- `STAGING_BUF_SIZE` 512 → 1024 (line 94), **plus a compile-time
+  `_Static_assert`** guaranteeing the buffer holds the format-ceiling
+  worst-case record (implemented as compile-time assert; stronger than
+  the runtime check originally specified here — a build whose
+  worst-case record exceeds `STAGING_BUF_SIZE` cannot compile at all,
+  rather than failing at run time inside `finalize_pending_insn`). The
+  v3 format-ceiling worst case is 4 + 8 + 15 + 7×(8+8+1+1+64) = **601
+  bytes > 512**. With today's `VALUE_API_CAP = 16` the real worst case
+  is 265 bytes, so the assert is satisfied by the shipped
+  `STAGING_BUF_SIZE` — it exists to catch the day `value_cap` grows
+  past 16 (or someone raises the cap without the buffer) at build time
+  instead of at run time. Growing the buffer and adding the assert now,
+  while we are staring at it, is the point.
 - `MemOpRecord` (lines 131–137) gains `uint64_t paddr`; `value[]` grows
   to 64. Hot-path `memset` of the value buffer (line ~514) clears only
   `size` bytes, not the full 64.
@@ -524,7 +528,7 @@ Structure (his host is ARM, so KVM is available):
 | `qemu_plugin_get_hwaddr` returns NULL | PA=0, `pa_valid=0`; counted, reported at exit |
 | MMIO access | PA recorded as returned, `pa_is_io=1`; counted |
 | Mem ops > 7 on one instruction | Dropped (pre-existing), now counted and reported |
-| Staged record exceeds staging buffer | Hard stop with message (was: silent stack smash) |
+| Staged record exceeds staging buffer | Compile-time `_Static_assert` failure (implemented as compile-time assert; stronger than the runtime check originally specified here — a build whose worst-case record exceeds the staging buffer cannot compile; was: silent stack smash) |
 | Reader meets unknown version or arch byte | Clean error naming the value and the supported set |
 | Reader meets v3 where unsupported (filter/A64, converter/A64) | Clean error naming this spec |
 | Reader meets per-op has_value in a has_values=0 file | Corrupt-file error |
@@ -560,10 +564,15 @@ Structure (his host is ARM, so KVM is available):
    explicitly `UNKNOWN`.
 4. **Overflow guard.** Compile a debug plugin with
    `-DSTAGING_BUF_SIZE=256` (the constant is `#ifndef`-guarded for this
-   purpose — §4.1); a real capture's first multi-mem-op instruction
-   trips the bounds check, proving the hard-stop path works. (With the
-   production cap of `VALUE_API_CAP=16`, real records max at 265 bytes,
-   so the assert is unreachable in a production build — by design.)
+   purpose — §4.1). This build is expected to **fail compilation** with
+   the `_Static_assert` message ("STAGING_BUF_SIZE cannot hold
+   worst-case v3 record") — that compile failure is the test passing
+   (implemented as compile-time assert; stronger than the runtime check
+   originally specified here, which would have required running a real
+   capture to trip a bounds check at run time). (With the production
+   cap of `VALUE_API_CAP=16`, real records max at 265 bytes, so the
+   shipped `STAGING_BUF_SIZE=1024` compiles fine — the assert only
+   fires for a deliberately undersized build like this test's 256.)
 5. **Reader whitelists.** Hex-edit a copy of a v3 header to version 4
    and to arch 2; confirm all three readers produce clean errors naming
    the value and supported set. Run one capture with a deliberately
