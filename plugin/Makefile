@@ -43,6 +43,9 @@ QEMU_PLUGIN_INC := $(shell \
 
 # ─────────────────────────────────────────────
 
+GIT_COMMIT := $(shell git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)
+GIT_DIRTY  := $(shell git diff --quiet 2>/dev/null || echo -dirty)
+
 .PHONY: all plugin inspector filter clean check-deps
 
 all: check-deps plugin inspector filter
@@ -67,6 +70,7 @@ $(PLUGIN): champsim_tracer.c
 	$(CC) $(CFLAGS) -shared -fPIC \
 		$(QEMU_PLUGIN_INC) \
 		$(GLIB_CFLAGS) $(ZSTD_CFLAGS) \
+		-DCSTF_COMMIT_STR='"CSTF_COMMIT=$(GIT_COMMIT)$(GIT_DIRTY)"' \
 		-o $@ $< \
 		$(GLIB_LDFLAGS)
 	@echo "Built: $@"

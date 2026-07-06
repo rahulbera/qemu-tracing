@@ -33,10 +33,16 @@ echo "Building ${PLUGIN_OUT}..."
 echo "  QEMU source: ${QEMU_SRC}"
 echo "  zstd: $(pkg-config --modversion libzstd)"
 
+GIT_COMMIT="$(git -C "$(dirname "$0")" rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
+if [ "$GIT_COMMIT" != "unknown" ] && ! git -C "$(dirname "$0")" diff --quiet 2>/dev/null; then
+    GIT_COMMIT="${GIT_COMMIT}-dirty"
+fi
+
 gcc -O2 -Wall -Wextra -Wno-unused-parameter \
     -shared -fPIC \
     -I"${QEMU_SRC}/include/qemu" \
     $(pkg-config --cflags glib-2.0 libzstd) \
+    -DCSTF_COMMIT_STR="\"CSTF_COMMIT=${GIT_COMMIT}\"" \
     -o "${PLUGIN_OUT}" "${PLUGIN_SRC}" \
     $(pkg-config --libs glib-2.0 libzstd)
 
