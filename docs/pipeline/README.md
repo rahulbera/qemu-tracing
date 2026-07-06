@@ -71,6 +71,31 @@ with no user-mode instructions between) and the filter's design.
 Read this if you're modifying the filter or diagnosing why the trace
 volume is unexpectedly high.
 
+### Raw trace format v3 (AArch64 capture kit)
+
+The raw trace format bumped from v2 to **v3**: a per-file arch byte
+(x86_64/aarch64), optional guest physical-address capture, and a
+`value_cap` byte that separates the format's 64-byte value-buffer
+ceiling from the 16-byte cap QEMU's value-capture API actually
+supports today. The full byte-level contract is frozen in
+`docs/superpowers/specs/2026-07-06-aarch64-capture-kit-design.md`;
+`plugin/README.md` has the reader-facing summary and knob reference.
+Old v2 files remain readable forever — all three readers
+(`trace_inspector`, `trace_filter`, `converter/raw2champsim`)
+whitelist versions `{2, 3}`.
+
+### `scripts/capture-kit/`
+
+Not a doc in this directory but the operational counterpart to the
+v3 format bump above: a self-contained kit that lets an **AArch64
+collaborator** capture traces from their own guest without hand-
+assembling plugin knobs — `probe_guest.sh` (runs inside the guest),
+`configure_tracer.sh` (runs on the host, emits `run_trace.sh` +
+a `trace_metadata.txt` provenance sidecar), and its own README with
+the full step-by-step, including the mandatory KVM→TCG smoke test.
+See `scripts/README.md` for how it fits alongside the x86 launcher
+scripts.
+
 ## How to use
 
 - New collaborator? Read `pipeline-stages.md` end-to-end.
@@ -79,3 +104,6 @@ volume is unexpectedly high.
 - Snapshot won't load under TCG? `kvmclock-patch-details.md`.
 - Kernel-idle noise in traces? `task-tcg-idle-loop-filtering.md` plus
   `plugin/trace_filter`.
+- Tracing an AArch64 guest? Skip straight to `scripts/capture-kit/` —
+  don't hand-assemble the plugin knobs from `boot-commands.md`, which
+  is x86-only.

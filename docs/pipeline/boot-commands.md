@@ -33,6 +33,9 @@
 
 ## TCG Boot + Plugin (THE TRACING RUN)
 
+AArch64 guests: use `scripts/capture-kit/` — do not hand-assemble the
+plugin knobs.
+
 ```bash
 ~/qemu-custom/bin/qemu-system-x86_64 \
     -accel tcg,thread=multi \
@@ -87,7 +90,7 @@ qemu-img snapshot -l ~/qemu-tracing/images/ubuntu-guest.qcow2
 ## Rebuild QEMU After Patching
 
 ```bash
-cd ~/qemu-9.2.4/build
+cd ~/softwares/qemu-9.2.4/build
 make -j$(nproc)
 make install
 ```
@@ -96,5 +99,5 @@ make install
 
 ```bash
 cd ~/qemu-tracing/plugin
-bash build_plugin.sh ~/qemu-9.2.4
+bash build_plugin.sh ~/softwares/qemu-9.2.4
 ```

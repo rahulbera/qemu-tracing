@@ -45,28 +45,118 @@ header comment of `champsim_tracer.c`.
 The **QEMU TCG plugin** itself. Registers `qemu_plugin_install()` and
 per-vCPU/per-TB callbacks with QEMU, and writes a zstd-compressed raw
 trace file per traced vCPU. The full raw format is documented at the
-top of the source file; a summary:
+top of the source file (canonical byte-level reference:
+`docs/superpowers/specs/2026-07-06-aarch64-capture-kit-design.md`, §3);
+this is a summary of **format v3**, current since the AArch64 capture
+kit work.
 
-- 16-byte file header (magic `CSTF`, version `2`, vCPU id).
-- Per instruction: 4-byte header (encodes vCPU id, privilege bit,
-  instruction size 1–15, num memory ops 0–7) + 8-byte IP + raw
-  instruction bytes + per memory op (address, size, flags, optional
-  value up to 16 bytes).
+**File header — 16 bytes, unchanged size from v2:**
 
-Plugin knobs (passed via `-plugin champsim_tracer.so,knob=value,...`):
+```
+Offset  Size  Field       Value / semantics
+0       u32   magic       "CSTF" (0x46545343 little-endian)
+4       u32   version     3
+8       u32   vcpu_id
+12      u8    arch        0 = x86_64, 1 = aarch64
+13      u8    flags       bit0 has_pa      (mem-ops carry an 8-byte PA)
+                          bit1 has_values  (value capture enabled)
+                          bits2-7 reserved, written 0
+14      u8    value_cap   effective value-capture cap in bytes (0 if
+                          has_values=0; see "value_cap semantics" below)
+15      u8    reserved    0
+```
 
-- `outdir=<path>` — where to write `trace_vcpu<N>.raw.zst`.
-- `vcpus=0-3` (or `0,1,2,3`) — which vCPUs to trace.
-- `limit=<N>` — instruction limit per vCPU (`0` = unlimited).
-- `trigger=<path>` — if set, tracing is *deferred* until this file
-  appears on the host filesystem. Enables "start tracing after the
-  benchmark reaches steady state" — the guest keeps running under TCG,
-  but no records are written until you `touch <path>` on the host.
+Bytes 12–15 replace v2's reserved u32. **Readers must decode them as
+individual `uint8_t`s, not as bitfields of a little-endian u32** — this
+is an easy endianness trap. The three u32 fields (magic, version,
+vcpu_id) keep the existing host-little-endian memcpy convention.
+
+**Per instruction (variable length):**
+
+```
+[header: 4 bytes, uint32_t]     bits[3:0] vcpu_id, bit[4] privilege,
+                                bits[8:5] instr_size (1-15),
+                                bits[11:9] num_mem_ops (0-7)
+[IP: 8 bytes]
+[instruction bytes: instr_size bytes]
+[memory ops × num_mem_ops]:
+    VA:      8 bytes  (uint64_t, guest virtual address)
+    PA:      8 bytes  (uint64_t, guest physical address) — ONLY
+             present when the file-header flags.has_pa bit is set.
+             Per-file, all-or-nothing: when present, it appears in
+             every mem-op regardless of pa_valid/pa_is_io; a failed
+             hwaddr lookup writes PA=0.
+    size:    1 byte   (access width in bytes)
+    opflags: 1 byte   bit0 write
+                      bit1 has_value
+                      bit2 pa_valid   (hwaddr lookup succeeded)
+                      bit3 pa_is_io   (MMIO: PA is device-relative,
+                                       not RAM; only meaningful when
+                                       has_pa/pa_valid are set)
+                      bits4-7 reserved, 0
+    value:   size bytes, present iff opflags.has_value = 1
+```
+
+**Plugin knobs** (passed via `-plugin champsim_tracer.so,knob=value,...`):
+
+| Knob | Values | Default | Behavior |
+|---|---|---|---|
+| `outdir=<path>` | any path | *(required)* | where to write `trace_vcpu<N>.raw.zst` |
+| `vcpus=<range>` | `0-3` or `0,1,2,3` | *(required)* | which vCPUs to trace |
+| `limit=<N>` | integer | `0` = unlimited | instruction limit per vCPU |
+| `trigger=<path>` | host path | none (immediate) | tracing is *deferred* until this file appears on the host filesystem — the guest keeps running under TCG, but no records are written until you `touch <path>` on the host |
+| `arch=` | `auto` \| `x86_64` \| `aarch64` | `auto` | `auto` resolves from the QEMU target at install time; an explicit value overrides detection (a mismatch logs a prominent warning but honors the override). An unknown target under `auto` is a **fatal install error** — the plugin never guesses the privilege threshold |
+| `capture_pa=` | `on` \| `off` \| `1` \| `0` | `on` | capture each mem-op's guest physical address via `qemu_plugin_get_hwaddr`. `off` genuinely skips the hwaddr call (it costs a TLB walk per access), not just the record bytes |
+| `values=` | `on` \| `off` \| `1` \| `0` | `on` | capture memory values via `qemu_plugin_mem_get_value`. `off` means no mem-op ever sets `has_value`, and the header's `flags.has_values=0`/`value_cap=0` |
+
+**`value_cap` semantics — the honest provision.** Header byte 14
+records the *effective* value-capture cap of the build that wrote the
+file: the guarantee that no captured value exceeds it. Today that's
+**16**, not the format's 64-byte ceiling (`MAX_VALUE_SIZE`), because
+`qemu_plugin_mem_get_value()` tops out at U128 (16 bytes) in QEMU
+9.2 — calling it on a wider access is a hard `g_assert_not_reached()`
+**VM abort**, not a skipped value. So an access wider than 16 bytes
+(some AArch64 SVE loads/stores, for example) gets its address and size
+captured with `has_value=0`; the plugin never attempts extraction on
+it. The format ceiling stays 64 bytes (matching the ChampSim v2
+record's value slots) precisely so that when a wider QEMU API exists,
+the plugin can start writing a larger `value_cap` with **no format
+change and no reader change** — readers size their buffers from the
+64-byte ceiling and validate each value against `value_cap`, never the
+other way around.
+
+**v2 files remain readable.** The plugin emits v3 only — there is no
+v2-emission mode — but `trace_inspector`, `trace_filter`, and
+`converter/raw2champsim` all whitelist versions `{2, 3}` and continue
+to read existing v2 files on disk forever (decoded as `arch=x86_64`,
+no PA/value_cap fields). You do not need to re-capture or convert old
+traces after upgrading the plugin.
+
+**Install-time banner.** Every run prints its exact capture
+configuration to stderr, including the plugin's own build identity:
+
+```
+[champsim_tracer] Arch: aarch64 | capture_pa: on | values: on (value_cap=16) | CSTF_COMMIT=<sha>
+```
+
+`CSTF_COMMIT` is `git rev-parse --short=12 HEAD` (plus a `-dirty`
+suffix for an uncommitted tree) baked into the `.so` as a string
+constant at build time by both `build_plugin.sh` and the `Makefile`.
+It tells you exactly which commit of `champsim_tracer.c` produced a
+given trace — `scripts/capture-kit/configure_tracer.sh` recovers it
+from the `.so` via `strings` for the provenance sidecar it writes.
 
 ### `trace_inspector.c` → `trace_inspector`
 
 Offline validator/inspector for `.raw` and `.raw.zst` files.
-Auto-detects the format from the first four bytes.
+Auto-detects the format from the first four bytes, and reads both v2
+and v3 (any unknown version or arch byte is a clean error naming the
+value and the supported set — it never silently misparses a newer
+format). For v3 files it decodes and prints arch, `has_pa`,
+`has_values`, `value_cap`, a PA-valid percentage and IO-access count,
+and — for `arch=aarch64` only — a sanity line
+(`sanity: instr_size!=4 in N/M records (X.XX%)`) flagging non-4-byte
+instructions, which on AArch64 means T32/A32 EL0 code is present.
 
 Usage:
 
@@ -75,6 +165,7 @@ Usage:
 ./trace_inspector traces/trace_vcpu0.raw.zst
 
 # Verbose — print each instruction record with decoded memory values
+# (and, for v3 files with PA capture on, each op's PA/valid/io state)
 ./trace_inspector -v -n 20 traces/trace_vcpu0.raw.zst
 ```
 
@@ -90,6 +181,18 @@ from a raw trace. Under TCG the guest kernel's idle loop emulates
 end up ~80% kernel-mode when only ~50% is real work. The filter
 detects runs of kernel-mode instructions bounded by two `HLT`s with
 no user-mode instruction in between and removes them.
+
+Reads v2 and v3 (version and arch whitelisted like the inspector); v3
+framing is conditional on the file header's `has_pa` bit (8 extra PA
+bytes per mem-op when set), and filtering semantics for `arch=x86_64`
+are byte-for-byte identical to v2 — `has_pa` only changes record
+framing, never a filtering decision. **`arch=aarch64` files are a hard
+error**: the HLT-based idle heuristic does not transfer to AArch64's
+`WFI`/`WFE`/`WFIT` idle instructions without validation against real
+A64 traces, and silently filtering nothing would be worse than
+refusing to run (see
+`docs/superpowers/specs/2026-07-06-aarch64-capture-kit-design.md`,
+§4.3).
 
 Usage:
 
@@ -113,7 +216,7 @@ Builds all three targets. Usage:
 make
 
 # Point at a QEMU source tree instead of an install
-make QEMU_PREFIX=~/qemu-9.2.4/build
+make QEMU_PREFIX=~/softwares/qemu-9.2.4/build
 
 # Individual targets
 make plugin       # only champsim_tracer.so
@@ -138,8 +241,8 @@ misfires). Takes an optional path to the QEMU source tree; defaults to
 `~/softwares/qemu-9.2.4`.
 
 ```bash
-./build_plugin.sh                    # uses default path
-./build_plugin.sh ~/qemu-9.2.4       # explicit source path
+./build_plugin.sh                          # uses default path
+./build_plugin.sh ~/softwares/qemu-9.2.4   # explicit source path
 ```
 
 Prints the exact `-plugin ...` string you'd feed to `qemu-system-x86_64`

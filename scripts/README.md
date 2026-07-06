@@ -7,6 +7,10 @@ Three scripts that cover the three ways you'll invoke QEMU in this
 project: boot fresh under KVM, restore a snapshot under KVM, and
 restore a snapshot under TCG *with the tracing plugin attached*.
 
+This directory also holds `capture-kit/`, a self-contained subdirectory
+for AArch64 collaborators — see its own entry under Files below and
+the note at the end of this section.
+
 ## How this fits into the repo
 
 These scripts are what you actually run on the host to move a workload
@@ -109,6 +113,24 @@ touch /tmp/trace_start
 The plugin polls once every 10 M instructions across all vCPUs
 (≈once per wall-clock second under TCG). Traces land at
 `~/qemu-tracing/traces/trace_vcpu<N>.raw.zst`.
+
+### `capture-kit/`
+
+A self-contained subdirectory, not a single launcher script — the
+capture kit for an **AArch64 collaborator** capturing raw v3 traces on
+their own (AArch64) host, where this project's x86-specific
+`boot_kvm.sh`/`restore_kvm.sh`/`boot_tcg_trace.sh` don't apply. It
+holds `probe_guest.sh` (collects guest facts), `configure_tracer.sh`
+(turns those facts plus host facts into a ready-to-run
+`run_trace.sh` and a `trace_metadata.txt` provenance sidecar), and its
+own `README.md` — read that file, not this one, for the full flow.
+
+**The one guest-side exception to "scripts/ is host-side":**
+`probe_guest.sh` is the single script in this directory meant to run
+*inside* the guest VM, not on the host — everything else here,
+including the rest of the capture kit, runs on the host. See
+`plugin/README.md` for the v3 raw format and knob semantics the kit
+configures on the collaborator's behalf.
 
 ## How to use
 

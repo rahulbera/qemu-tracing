@@ -62,7 +62,7 @@ realistic cross-socket sharing.
 - **RAM:** 32 GB
 - **OS:** Ubuntu 24.04 LTS
 - **QEMU:** 9.2.4 (built from source with `--enable-kvm --enable-plugins`)
-- **QEMU source:** `~/qemu-9.2.4/`
+- **QEMU source:** `~/softwares/qemu-9.2.4/`
 - **QEMU install:** `~/qemu-custom/bin/qemu-system-x86_64`
 
 ## Guest VM Configuration
@@ -171,7 +171,7 @@ snapshot loads normally.
 
 ### What Needs to Be Done
 
-1. Find the exact `kvmclock_create()` function in `~/qemu-9.2.4/hw/i386/kvm/clock.c`
+1. Find the exact `kvmclock_create()` function in `~/softwares/qemu-9.2.4/hw/i386/kvm/clock.c`
    and identify where the `kvm_enabled()` guard prevents device creation under TCG.
 
 2. Find where `kvmclock_create()` is called from (likely `hw/i386/pc.c` or similar
@@ -181,20 +181,20 @@ snapshot loads normally.
 
 4. Patch the call site or `kvmclock_create()` to remove/relax the `kvm_enabled()` guard.
 
-5. Rebuild QEMU: `cd ~/qemu-9.2.4/build && make -j$(nproc) && make install`
+5. Rebuild QEMU: `cd ~/softwares/qemu-9.2.4/build && make -j$(nproc) && make install`
 
 6. Test: Load `roi_running` snapshot under TCG with the tracing plugin.
 
 ### Key Source Files
 
-- `~/qemu-9.2.4/hw/i386/kvm/clock.c` — kvmclock device implementation
-- `~/qemu-9.2.4/migration/savevm.c` — snapshot loading (error originates here)
-- `~/qemu-9.2.4/hw/i386/pc.c` or `~/qemu-9.2.4/hw/i386/x86.c` — likely calls `kvmclock_create()`
+- `~/softwares/qemu-9.2.4/hw/i386/kvm/clock.c` — kvmclock device implementation
+- `~/softwares/qemu-9.2.4/migration/savevm.c` — snapshot loading (error originates here)
+- `~/softwares/qemu-9.2.4/hw/i386/pc.c` or `~/softwares/qemu-9.2.4/hw/i386/x86.c` — likely calls `kvmclock_create()`
 
 ### Build Configuration
 
 ```bash
-cd ~/qemu-9.2.4/build
+cd ~/softwares/qemu-9.2.4/build
 ../configure \
     --target-list=x86_64-softmmu \
     --enable-kvm \
@@ -266,7 +266,7 @@ the same approach applies: find the device, make it instantiable under TCG.
     ├── boot_kvm_5vcpu.sh              # Stage 2+ KVM boot (5 vCPU)
     └── boot_tcg_trace.sh              # Stage 4 TCG+plugin boot
 
-~/qemu-9.2.4/                          # QEMU source tree
+~/softwares/qemu-9.2.4/                # QEMU source tree
 ~/qemu-custom/                         # QEMU install prefix
 ```
 
@@ -278,11 +278,21 @@ the same approach applies: find the device, make it instantiable under TCG.
 ~/start_memcached_pinned.sh # Start Memcached with thread pinning
 ```
 
-## Raw Trace Format (v2)
+## Raw Trace Format (v3)
 
-**File:** `.raw.zst` (zstd compressed)
+**File:** `.raw.zst` (zstd compressed). Current since the AArch64
+capture kit work; full byte-level contract in
+`docs/superpowers/specs/2026-07-06-aarch64-capture-kit-design.md`
+(§3). Old v2 files remain readable forever — `trace_inspector`,
+`trace_filter`, and `converter/raw2champsim` all whitelist versions
+`{2, 3}` — but the plugin itself now emits v3 only.
 
-**Header (16 bytes):** magic `CSTF`, version `2`, vcpu_id, reserved
+**Header (16 bytes, same size as v2):** magic `CSTF`, version `3`,
+vcpu_id, then four individual `uint8_t` fields (not a packed u32,
+readers must decode byte-by-byte) replacing v2's reserved word:
+`arch` (0=x86_64, 1=aarch64), `flags` (bit0 `has_pa`, bit1
+`has_values`), `value_cap` (effective value-capture cap in bytes,
+0 if `has_values=0`), `reserved` (0).
 
 **Per instruction (variable length):**
 ```
@@ -295,11 +305,27 @@ the same approach applies: find the device, make it instantiable under TCG.
 [IP: 8 bytes]
 [instruction bytes: instr_size bytes]
 [memory ops × num_mem_ops:]
-  address: 8 bytes
+  VA:      8 bytes
+  PA:      8 bytes (ONLY present when file header flags.has_pa=1;
+           per-file all-or-nothing; failed hwaddr lookups write 0)
   size:    1 byte
-  flags:   1 byte (bit 0: write, bit 1: has_value)
-  value:   size bytes (only if has_value)
+  opflags: 1 byte (bit0 write, bit1 has_value, bit2 pa_valid,
+           bit3 pa_is_io — bits 2-3 meaningful only when has_pa=1)
+  value:   size bytes (only if has_value; only ever set when
+           size <= value_cap)
 ```
+
+**`value_cap`:** today's plugins write `value_cap = 16` because
+`qemu_plugin_mem_get_value()` tops out at U128 (16 bytes) and asserts
+(VM abort) on wider accesses — that hard API cap is why `value_cap` is
+tracked separately from the format's 64-byte value-buffer ceiling
+(`MAX_VALUE_SIZE`), which exists so a future wider QEMU API needs no
+format or reader change.
+
+New plugin knobs beyond v2's `outdir=`/`vcpus=`/`limit=`/`trigger=`:
+`arch=auto|x86_64|aarch64` (default `auto`, resolved from the QEMU
+target), `capture_pa=on|off` (default `on`), `values=on|off` (default
+`on`). Full knob and format reference: `plugin/README.md`.
 
 ## ChampSim Trace Format (Target)
 

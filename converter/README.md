@@ -44,11 +44,24 @@ layout is defined near the top of the source; a summary:
   source/destination registers (4 src, 2 dst), source/destination
   memory virtual addresses.
 - **Block 2** (64 B) — v2 additions: source/destination physical
-  addresses (zero-filled — we don't have PA under QEMU/PIN yet),
-  per-operand access sizes, privilege bit, instruction type
+  addresses, per-operand access sizes, privilege bit, instruction type
   (INT/FP/SIMD), reserved bytes.
 - **Block 3** (384 B) — memory values: up to 64 bytes per source
   memory op × 4 + up to 64 bytes per destination memory op × 2.
+
+**Input support:** reads raw trace format v2 and v3/x86_64. For a raw
+v3 trace captured with `capture_pa=on`, the converter populates the
+ChampSim record's `source_memory_pa[]`/`destination_memory_pa[]` slots
+with the real guest physical address whenever a mem-op's `pa_valid`
+bit is set and `pa_is_io` is not (MMIO addresses are device-relative,
+not RAM, so they're left zero); a failed hwaddr lookup or a v2 input
+(which has no PA at all) also leaves the slot at zero, same as before
+this converter had any PA source.
+
+**v3/aarch64 input is a clean error** — AArch64 decode is
+Capstone-based work for a subsequent spec/converter, not yet
+implemented here (see
+`docs/superpowers/specs/2026-07-06-aarch64-capture-kit-design.md`).
 
 Usage:
 
