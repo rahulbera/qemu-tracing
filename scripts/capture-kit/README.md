@@ -137,9 +137,16 @@ invocation there is a clearly marked block:
 
 Replace that comment block with everything you normally boot this
 guest with — `-cpu`, `-drive`/pflash firmware, `-nic`, cloud-init seed,
-etc. Do **not** add `-accel` or `-machine`: those are already set by
-the template (`-machine virt -accel tcg,thread=multi`). One hard
-constraint: **`-cpu host` will not work under TCG** — TCG cannot
+etc. Do **not** add `-accel`, `-machine`, `-smp`, or `-m`: all four are
+already set by the template — `-machine virt -accel tcg,thread=multi`
+inline, plus `-smp "$SMP" -m "$MEM"`, where `SMP=4` and `MEM=4G` are
+ordinary shell variables near the top of the generated script, right
+next to `SNAPSHOT=`. If your guest normally boots with a different vCPU
+count or RAM size, edit those two variables there — don't paste a
+second `-smp`/`-m` into the boot-flags block below (QEMU accepts
+duplicate `-smp`/`-m` flags silently, last one wins, and you'll end up
+tracing the wrong vCPU count without any error telling you so). One
+hard constraint: **`-cpu host` will not work under TCG** — TCG cannot
 emulate a passthrough host CPU, so you need a named model (e.g.
 `-cpu cortex-a76`, `-cpu max`). This matters most for the two-phase
 flow below, where the same `-cpu` has to work under both KVM and TCG.
@@ -224,8 +231,11 @@ The whole job of this step is deciding *when* to do that.
 **Do not touch the trigger right after boot.** On a real ARM64 Ubuntu
 guest under TCG, UEFI firmware plus kernel boot takes on the order of
 **tens of billions of instructions** before you even reach a login
-prompt — a validation run on this project's own test guest measured
-~20.6 billion instructions to login. Any fixed "trace the first N
+prompt — a validation run on this project's own test guest found that
+on the order of 20 billion instructions elapse before the guest is even
+past login (that run's specific measurement was taken shortly after the
+login prompt appeared, not at the exact instant of it, so treat it as
+qualitative, not a precise cutoff). Any fixed "trace the first N
 instructions" recipe will only ever capture firmware, never your
 workload. Instead:
 
@@ -266,19 +276,48 @@ The instant you `touch` the trigger file, you'll see:
 [champsim_tracer] Tracing is now ENABLED (skipped <N> instructions during dormant phase)
 ```
 
-and, once a vCPU hits its instruction `limit` (or you shut the guest
-down), a summary line per traced vCPU:
+and, once a vCPU hits its instruction `limit` **and** you shut the
+guest down, a summary line per traced vCPU:
 
 ```
 [champsim_tracer] vCPU 0: 20000000 insns, 5898007 mem ops (5898007 with values), 459.5 MB raw -> 63.8 MB zstd (7.2x) [limit]
 ```
 
-Expect TCG to be dramatically slower than KVM — think single-digit
-millions of guest instructions per wall-clock second, not the billions
-KVM gives you, and multi-threaded TCG (`thread=multi`, already set in
-the template) will still be far behind KVM. Budget capture time
-accordingly, and prefer a smaller `LIMIT` for your first real run so
-you can validate (section 7) before committing to a long capture.
+**Important: that summary line only ever prints when QEMU exits — it
+does not print live the moment a vCPU hits its `limit`.** A vCPU that
+reaches its instruction cap stops writing to its `.raw.zst` file
+immediately, but the plugin stays silent about it until the whole QEMU
+process exits (clean shutdown or otherwise); this project's own
+validation run confirmed a vCPU can sit at its cap for 20+ minutes with
+zero stderr output before the summary finally appears at shutdown. So
+you cannot use "wait for the summary line" as your cue to shut down —
+by the time you see it, the guest is already gone. Instead:
+
+1. After `touch`-ing the trigger, just wait out the expected capture
+   duration rather than watching stderr for a completion signal. As a
+   rule of thumb from this project's own validation runs, budget on the
+   order of a few minutes of wall-clock time per 2 million instructions
+   per traced vCPU under TCG on a reasonably fast host — scale that
+   linearly for whatever `LIMIT` you configured (expect TCG to run
+   single-digit millions of guest instructions per wall-clock second,
+   not the billions KVM gives you; multi-threaded TCG, `thread=multi`,
+   already set in the template, will still be far behind KVM).
+2. Optionally, corroborate that estimate by watching the output
+   directory instead of stderr:
+   ```bash
+   watch -n 5 ls -l <outdir>
+   ```
+   Growing `.raw.zst` sizes mean capture is still active; a size that's
+   stopped changing for well longer than your estimate from step 1
+   means every traced vCPU has likely already hit its `limit`.
+3. Shut the guest down (`ssh <guest> sudo poweroff`, or QEMU
+   monitor `quit`/SIGTERM) once you're confident capture is done. The
+   per-vCPU `[limit]` summary above will appear in stderr at that point
+   — that's your authoritative, after-the-fact confirmation of what was
+   actually captured, not a thing to wait for beforehand.
+
+Prefer a smaller `LIMIT` for your first real run so you can validate
+(section 7) before committing to a long capture.
 
 ## 7. Step 5 — validate
 

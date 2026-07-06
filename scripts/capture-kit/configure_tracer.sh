@@ -29,9 +29,28 @@ warn() { echo "WARNING: $*" >&2; }
 # --- QEMU checks ---
 [ -n "$QEMU" ] && [ -x "$QEMU" ] || die "qemu-system-aarch64 not found.
 Set QEMU=/path/to/qemu-system-aarch64 (must be built with --enable-plugins)."
-QV_RAW="$("$QEMU" --version | head -1)"
+QV_RAW="$("$QEMU" --version 2>&1 | head -1)"
+NOT_QEMU_MSG="could not confirm '$QEMU' is really qemu-system-aarch64
+(its --version output was: '$QV_RAW'). Set QEMU=/path/to/qemu-system-aarch64."
+# Reject anything whose --version output doesn't even claim to be QEMU.
+# This also defeats the GNU-coreutils false-positive: '/bin/false --version'
+# prints "false (GNU coreutils) 9.4", which contains a syntactically valid
+# X.Y pair that would otherwise sail through the numeric check below.
+case "$QV_RAW" in
+    *QEMU*) : ;;
+    *) die "$NOT_QEMU_MSG" ;;
+esac
 QV=$(echo "$QV_RAW" | grep -oE '[0-9]+\.[0-9]+' | head -1)
+# Reject empty/unparseable version strings before doing arithmetic on them —
+# `[ "$QMAJ" -lt 9 ]` with an empty or non-numeric operand is a bash "integer
+# expression expected" ERROR (not a false condition), which used to let an
+# unvalidated QEMU slip through silently.
+case "$QV" in
+    ''|*[!0-9.]*) die "$NOT_QEMU_MSG" ;;
+esac
 QMAJ=${QV%%.*}; QMIN=${QV##*.}
+case "$QMAJ" in ''|*[!0-9]*) die "$NOT_QEMU_MSG" ;; esac
+case "$QMIN" in ''|*[!0-9]*) die "$NOT_QEMU_MSG" ;; esac
 if [ "$QMAJ" -lt 9 ] || { [ "$QMAJ" -eq 9 ] && [ "$QMIN" -lt 1 ]; }; then
     die "QEMU $QV is too old: the plugin's value capture needs >= 9.1
 (qemu_plugin_mem_get_value). Upgrade QEMU or rebuild from source."
@@ -62,7 +81,11 @@ mkdir -p "$OUTDIR"
 # --- Sidecar ---
 META="$KIT_DIR/trace_metadata.txt"
 {
-    cat "$GUEST_CFG"
+    # `sed -e '$a\'` (append an empty line after the last line) forces a
+    # trailing newline even if $GUEST_CFG lacks one — plain `cat` would let
+    # the next `echo` below get concatenated onto the guest config's last
+    # KEY=VALUE line instead of starting its own.
+    sed -e '$a\' "$GUEST_CFG"
     echo "QEMU_BIN=$QEMU"
     echo "QEMU_VERSION=$QV_RAW"
     echo "HOST_ARCH=$(uname -m)"
@@ -96,6 +119,14 @@ set -u
 # SNAPSHOT=""      -> cold boot under TCG (single-phase; always works).
 SNAPSHOT=""
 
+# ── vCPU count / RAM size ────────────────────────────────────────────
+# Also preset here, just like SNAPSHOT= above — edit THESE two variables
+# to match your guest, don't paste a second -smp/-m into the boot-flags
+# block below (QEMU accepts duplicates silently; last one wins, which
+# is easy to miss).
+SMP=4
+MEM=4G
+
 OUTDIR="$OUTDIR"
 mkdir -p "\$OUTDIR"
 cp "$META" "\$OUTDIR/trace_metadata.txt"   # sidecar travels with the traces
@@ -106,7 +137,7 @@ LOADVM=()
 "$QEMU" \\
     -machine virt \\
     -accel tcg,thread=multi \\
-    -smp 4 -m 4G \\
+    -smp "\$SMP" -m "\$MEM" \\
     -nographic -serial mon:stdio \\
     -plugin "$PLUGIN",outdir="\$OUTDIR",vcpus=$VCPUS,limit=$LIMIT,trigger=$TRIGGER,capture_pa=on,values=on \\
     "\${LOADVM[@]}" \\
@@ -114,8 +145,10 @@ LOADVM=()
     # ─── YOUR BOOT FLAGS GO HERE (replace this comment block) ────────
     # Add your usual -cpu, -drive, pflash firmware, -nic, cloud-init
     # seed, etc. — everything you normally boot this guest with, minus
-    # any -accel/-machine flags (already set above; -cpu note: TCG
-    # cannot use 'host'; use a named model, e.g. -cpu cortex-a76).
+    # any -accel/-machine/-smp/-m flags (all four are already set above —
+    # -smp/-m via the SMP=/MEM= variables near the top of this script,
+    # -accel/-machine inline; -cpu note: TCG cannot use 'host'; use a
+    # named model, e.g. -cpu cortex-a76).
     # ─────────────────────────────────────────────────────────────────
 RUNEOF
 chmod +x "$RUN"
