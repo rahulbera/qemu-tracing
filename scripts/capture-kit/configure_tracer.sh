@@ -19,6 +19,7 @@ PLUGIN="${PLUGIN:-$KIT_DIR/../../plugin/champsim_tracer.so}"
 QEMU="${QEMU:-$(command -v qemu-system-aarch64 || true)}"
 VCPUS="${VCPUS:-0}"
 LIMIT="${LIMIT:-1000000000}"
+ROTATE="${ROTATE:-100000000}"
 TRIGGER="/tmp/trace_start"
 
 die() { echo "ERROR: $*" >&2; exit 1; }
@@ -96,6 +97,7 @@ META="$KIT_DIR/trace_metadata.txt"
     echo "VALUES=on"
     echo "VALUE_CAP=16"
     echo "LIMIT=$LIMIT"
+    echo "ROTATE=$ROTATE"
     echo "VCPUS=$VCPUS"
     echo "TRIGGER=$TRIGGER"
     echo "OUTDIR=$OUTDIR"
@@ -139,7 +141,7 @@ LOADVM=()
     -accel tcg,thread=multi \\
     -smp "\$SMP" -m "\$MEM" \\
     -nographic -serial mon:stdio \\
-    -plugin "$PLUGIN",outdir="\$OUTDIR",vcpus=$VCPUS,limit=$LIMIT,trigger=$TRIGGER,capture_pa=on,values=on \\
+    -plugin "$PLUGIN",outdir="\$OUTDIR",vcpus=$VCPUS,limit=$LIMIT,trigger=$TRIGGER,capture_pa=on,values=on,rotate=$ROTATE \\
     "\${LOADVM[@]}" \\
     #
     # ─── YOUR BOOT FLAGS GO HERE (replace this comment block) ────────
