@@ -109,7 +109,28 @@ realistic cross-socket sharing.
 ### Stage 4: TCG Tracing Run — READY ✅
 **kvmclock blocker resolved** — QEMU patched to instantiate the kvmclock device under TCG.
 
+### Stage 5: Extended format, AArch64 capture kit, online rotation ✅
+- **Raw format v3** — arch byte, optional per-op physical addresses,
+  memory values with an honest `value_cap`. Emitted by the plugin;
+  read by `trace_inspector`, `trace_filter`, and `converter/raw2champsim`
+  (all whitelist versions `{2,3}`). Spec:
+  `docs/superpowers/specs/2026-07-06-aarch64-capture-kit-design.md`.
+- **AArch64 capture kit** (`scripts/capture-kit/`) — for a collaborator
+  capturing on an AArch64 host: `probe_guest.sh` (in-guest facts) →
+  `configure_tracer.sh` (host; emits a ready `run_trace.sh` + a
+  `trace_metadata.txt` provenance sidecar). The plugin auto-detects the
+  guest arch. Collaborator entry point: `scripts/capture-kit/README.md`.
+- **Online raw rotation** (`rotate=N`) — see the Raw Trace Format
+  section below; kit defaults it on at 100 M instructions/chunk.
+- Converter reads raw v2 and v3/x86_64 (PA passed through); v3/aarch64
+  decode (Capstone) + ChampSim AArch64 conventions are the next phase.
+
 ## Current Blocker: kvmclock Snapshot Incompatibility
+
+> **Historical (x86/Memcached era).** This blocker was resolved (see
+> Stage 4) and the section is kept for the debugging pattern it records.
+> The AArch64 collaborator captures under a different flow — see
+> `scripts/capture-kit/README.md`.
 
 ### The Problem
 
