@@ -469,6 +469,7 @@ static void finalize_pending_insn(VcpuState *vs)
     buffer_append(vs, staging, pos);
 
     vs->insn_count++;
+    vs->chunk_insn_count++;
     vs->mem_op_count += vs->pending_num_mem_ops;
     vs->has_pending = false;
 }
@@ -673,6 +674,17 @@ static void insn_exec_cb(unsigned int vcpu_index, void *userdata)
         vs->limit_reached = true;
         flush_buffer(vs);
         return;
+    }
+
+    if (rotate_interval > 0 && vs->chunk_insn_count >= rotate_interval)
+    {
+        close_chunk(vs);
+        vs->chunk_index++;
+        if (!open_chunk(vs))
+        {
+            vs->limit_reached = true;   /* fail safe: stop this vCPU, keep prior chunks */
+            return;
+        }
     }
 
     InsnMeta *meta = (InsnMeta *)userdata;
@@ -886,13 +898,18 @@ static bool parse_args(int argc, char **argv)
                 return false;
             }
         }
+        else if (g_str_has_prefix(arg, "rotate="))
+        {
+            rotate_interval = strtoull(arg + 7, NULL, 10);
+        }
         else
         {
             fprintf(stderr, "[%s] Unknown argument: %s\n", PLUGIN_NAME, arg);
             fprintf(stderr, "Usage: -plugin %s.so"
                             "[,outdir=<path>][,vcpus=<range>][,limit=<N>]"
                             "[,trigger=<host-file>][,arch=auto|x86_64|aarch64]"
-                            "[,capture_pa=on|off][,values=on|off]\n",
+                            "[,capture_pa=on|off][,values=on|off]"
+                            "[,rotate=<N>]\n",
                     PLUGIN_NAME);
             return false;
         }
@@ -945,6 +962,12 @@ static void plugin_atexit(qemu_plugin_id_t id, void *userdata)
         {
             g_free(vs->outbuf);
             vs->outbuf = NULL;
+        }
+
+        if (vs->manifest_fp)
+        {
+            fclose(vs->manifest_fp);
+            vs->manifest_fp = NULL;
         }
 
         double ratio = vs->bytes_compressed > 0
@@ -1101,6 +1124,13 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_install(qemu_plugin_id_t id,
     {
         fprintf(stderr, "[%s] Limit: unlimited\n", PLUGIN_NAME);
     }
+    if (rotate_interval > 0)
+        fprintf(stderr, "[%s] Rotation: every %" PRIu64 " insns/vCPU "
+                        "(trace_vcpu<V>_c<K>.raw.zst + manifest)\n",
+                PLUGIN_NAME, rotate_interval);
+    else
+        fprintf(stderr, "[%s] Rotation: off (single file per vCPU)\n",
+                PLUGIN_NAME);
     fprintf(stderr, "[%s] Compression: zstd level %d\n",
             PLUGIN_NAME, ZSTD_LEVEL);
     fprintf(stderr, "[%s] Arch: %s | capture_pa: %s | values: %s "
@@ -1144,6 +1174,26 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_install(qemu_plugin_id_t id,
 
         vs->outbuf_size = ZSTD_CStreamOutSize();
         vs->outbuf = g_malloc(vs->outbuf_size);
+
+        if (rotate_interval > 0)
+        {
+            char mpath[4300];
+            snprintf(mpath, sizeof(mpath), "%s/trace_vcpu%d_manifest.txt",
+                     output_dir, i);
+            vs->manifest_fp = fopen(mpath, "w");
+            if (vs->manifest_fp)
+            {
+                fprintf(vs->manifest_fp,
+                        "# vcpu %d rotation manifest: "
+                        "chunk file start_insn insn_count comp_bytes\n", i);
+                fflush(vs->manifest_fp);
+            }
+            else
+            {
+                fprintf(stderr, "[%s] WARNING: cannot open manifest %s\n",
+                        PLUGIN_NAME, mpath);
+            }
+        }
 
         if (!open_chunk(vs))
         {
