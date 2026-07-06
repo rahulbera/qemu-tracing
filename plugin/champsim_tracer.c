@@ -256,6 +256,13 @@ typedef struct
     uint64_t bytes_compressed;
     bool active;
     bool limit_reached;
+
+    /* Rotation (Task 2) — inert while rotate_interval==0 */
+    uint32_t chunk_index;
+    uint64_t chunk_insn_count;
+    uint64_t chunk_start_insn;
+    uint64_t chunk_bytes_at_open;
+    FILE *manifest_fp;
 } VcpuState;
 
 /* ================================================================
@@ -265,6 +272,7 @@ typedef struct
 static VcpuState vcpu_state[MAX_VCPUS];
 static bool trace_vcpu[MAX_VCPUS];
 static uint64_t insn_limit = 0;
+static uint64_t rotate_interval = 0;
 static char output_dir[4096] = ".";
 static qemu_plugin_id_t plugin_id;
 
@@ -517,6 +525,108 @@ static inline void extract_mem_value(qemu_plugin_meminfo_t meminfo,
 
     default:
         break;
+    }
+}
+
+/* ================================================================
+ * Chunk lifecycle: open_chunk / close_chunk
+ *
+ * Factored from the per-vCPU install loop and plugin_atexit so that
+ * (Task 2) online rotation can reuse them. With rotate_interval==0 and
+ * manifest_fp==NULL these behave exactly as the original inline code:
+ * one chunk per vCPU named trace_vcpu<V>.raw.zst, no manifest.
+ * ================================================================ */
+
+static bool open_chunk(VcpuState *vs)
+{
+    /* Fresh compressed stream for this chunk. */
+    vs->inbuf_pos = 0;
+
+    vs->cctx = ZSTD_createCCtx();
+    if (!vs->cctx)
+    {
+        fprintf(stderr, "[%s] ERROR: ZSTD_createCCtx failed (vcpu %u)\n",
+                PLUGIN_NAME, vs->vcpu_id);
+        return false;
+    }
+    ZSTD_CCtx_setParameter(vs->cctx, ZSTD_c_compressionLevel, ZSTD_LEVEL);
+    ZSTD_CCtx_setParameter(vs->cctx, ZSTD_c_checksumFlag, 1);
+
+    /* Filename: plain when not rotating, _c<KKKKK> when rotating. */
+    char filepath[4200];
+    if (rotate_interval > 0)
+    {
+        snprintf(filepath, sizeof(filepath),
+                 "%s/trace_vcpu%u_c%05u.raw.zst",
+                 output_dir, vs->vcpu_id, vs->chunk_index);
+    }
+    else
+    {
+        snprintf(filepath, sizeof(filepath), "%s/trace_vcpu%u.raw.zst",
+                 output_dir, vs->vcpu_id);
+    }
+
+    vs->outfile = fopen(filepath, "wb");
+    if (!vs->outfile)
+    {
+        fprintf(stderr, "[%s] ERROR: cannot open %s\n", PLUGIN_NAME, filepath);
+        ZSTD_freeCCtx(vs->cctx);
+        vs->cctx = NULL;
+        return false;
+    }
+
+    /* Per-chunk bookkeeping (open_chunk is the single owner). */
+    vs->chunk_insn_count    = 0;
+    vs->chunk_start_insn    = vs->insn_count;
+    vs->chunk_bytes_at_open = vs->bytes_compressed;
+
+    /* Write the 16-byte v3 header into the zstd stream. */
+    uint32_t magic = TRACE_FORMAT_MAGIC;
+    uint32_t version = TRACE_FORMAT_VER;
+    uint32_t vid = vs->vcpu_id;
+    uint8_t hdr_tail[4];
+    hdr_tail[0] = (uint8_t)trace_arch;
+    hdr_tail[1] = (capture_pa ? FILE_FLAG_HAS_PA : 0) |
+                  (capture_values ? FILE_FLAG_HAS_VALUES : 0);
+    hdr_tail[2] = capture_values ? VALUE_API_CAP : 0;
+    hdr_tail[3] = 0;
+
+    buffer_append(vs, &magic, 4);
+    buffer_append(vs, &version, 4);
+    buffer_append(vs, &vid, 4);
+    buffer_append(vs, hdr_tail, 4);
+
+    return true;
+}
+
+static void close_chunk(VcpuState *vs)
+{
+    finalize_pending_insn(vs);   /* flush any pending insn into this chunk */
+    flush_final(vs);             /* drain input buffer + end the zstd frame */
+
+    if (vs->outfile)
+    {
+        fclose(vs->outfile);
+        vs->outfile = NULL;
+    }
+    if (vs->cctx)
+    {
+        ZSTD_freeCCtx(vs->cctx);
+        vs->cctx = NULL;
+    }
+
+    /* Manifest line: only when rotating, a manifest is open, and this
+     * chunk actually received instructions (suppresses the empty chunk 0
+     * when the trigger never fires). */
+    if (rotate_interval > 0 && vs->manifest_fp && vs->chunk_insn_count > 0)
+    {
+        uint64_t comp = vs->bytes_compressed - vs->chunk_bytes_at_open;
+        fprintf(vs->manifest_fp,
+                "%u trace_vcpu%u_c%05u.raw.zst %" PRIu64 " %" PRIu64
+                " %" PRIu64 "\n",
+                vs->chunk_index, vs->vcpu_id, vs->chunk_index,
+                vs->chunk_start_insn, vs->chunk_insn_count, comp);
+        fflush(vs->manifest_fp);
     }
 }
 
@@ -823,20 +933,7 @@ static void plugin_atexit(qemu_plugin_id_t id, void *userdata)
             continue;
         }
 
-        finalize_pending_insn(vs);
-        flush_final(vs);
-
-        if (vs->outfile)
-        {
-            fclose(vs->outfile);
-            vs->outfile = NULL;
-        }
-
-        if (vs->cctx)
-        {
-            ZSTD_freeCCtx(vs->cctx);
-            vs->cctx = NULL;
-        }
+        close_chunk(vs);
 
         if (vs->inbuf)
         {
@@ -1048,47 +1145,13 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_install(qemu_plugin_id_t id,
         vs->outbuf_size = ZSTD_CStreamOutSize();
         vs->outbuf = g_malloc(vs->outbuf_size);
 
-        vs->cctx = ZSTD_createCCtx();
-        if (!vs->cctx)
+        if (!open_chunk(vs))
         {
-            fprintf(stderr, "[%s] ERROR: ZSTD_createCCtx failed\n",
-                    PLUGIN_NAME);
             return -1;
         }
-
-        ZSTD_CCtx_setParameter(vs->cctx, ZSTD_c_compressionLevel, ZSTD_LEVEL);
-        ZSTD_CCtx_setParameter(vs->cctx, ZSTD_c_checksumFlag, 1);
-
-        char filepath[4200];
-        snprintf(filepath, sizeof(filepath), "%s/trace_vcpu%d.raw.zst",
-                 output_dir, i);
-
-        vs->outfile = fopen(filepath, "wb");
-        if (!vs->outfile)
-        {
-            fprintf(stderr, "[%s] ERROR: cannot open %s\n",
-                    PLUGIN_NAME, filepath);
-            return -1;
-        }
-
-        /* Write v3 file header (16 bytes; bytes 12-15 are individual u8s) */
-        uint32_t magic = TRACE_FORMAT_MAGIC;
-        uint32_t version = TRACE_FORMAT_VER;
-        uint32_t vid = i;
-        uint8_t hdr_tail[4];
-        hdr_tail[0] = (uint8_t)trace_arch;                       /* arch */
-        hdr_tail[1] = (capture_pa ? FILE_FLAG_HAS_PA : 0) |      /* flags */
-                      (capture_values ? FILE_FLAG_HAS_VALUES : 0);
-        hdr_tail[2] = capture_values ? VALUE_API_CAP : 0;        /* value_cap */
-        hdr_tail[3] = 0;                                         /* reserved */
-
-        buffer_append(vs, &magic, 4);
-        buffer_append(vs, &version, 4);
-        buffer_append(vs, &vid, 4);
-        buffer_append(vs, hdr_tail, 4);
 
         vs->active = true;
-        fprintf(stderr, "[%s] vCPU %d -> %s\n", PLUGIN_NAME, i, filepath);
+        fprintf(stderr, "[%s] vCPU %d tracing initialized\n", PLUGIN_NAME, i);
     }
 
     /* Register callbacks */
