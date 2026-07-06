@@ -295,11 +295,13 @@ int main(int argc, char **argv)
     return 1;
   }
 
-  /* Read file header */
-  uint32_t magic, version, vcpu_id, reserved;
+  /* Read file header: three u32s + four individual bytes (v3 fields
+     must be decoded as u8s, never as a u32 — see spec 3.1) */
+  uint32_t magic, version, vcpu_id;
+  uint8_t  hdr_tail[4];
   if (!reader_read_exact(r, &magic, 4) || !reader_read_exact(r, &version, 4) ||
       !reader_read_exact(r, &vcpu_id, 4) ||
-      !reader_read_exact(r, &reserved, 4)) {
+      !reader_read_exact(r, hdr_tail, 4)) {
     fprintf(stderr, "ERROR: Cannot read file header\n");
     reader_close(r);
     return 1;
@@ -314,13 +316,42 @@ int main(int argc, char **argv)
     return 1;
   }
 
+  if (version != 2 && version != 3) {
+    fprintf(stderr,
+            "ERROR: Unsupported format version %u (supported: 2, 3)\n",
+            version);
+    reader_close(r);
+    return 1;
+  }
+
+  uint8_t arch          = 0;     /* v2 files are x86_64 by definition */
+  bool    file_has_pa   = false;
+  bool    file_has_vals = true;  /* v2: value capture always on */
+  uint8_t value_cap     = 16;
+
+  if (version == 3) {
+    arch          = hdr_tail[0];
+    file_has_pa   = (hdr_tail[1] & 0x1) != 0;
+    file_has_vals = (hdr_tail[1] & 0x2) != 0;
+    value_cap     = hdr_tail[2];
+    if (arch != 0 && arch != 1) {
+      fprintf(stderr,
+              "ERROR: Unknown arch byte %u (supported: 0=x86_64, 1=aarch64)\n",
+              arch);
+      reader_close(r);
+      return 1;
+    }
+  }
+
   printf("=== Trace File: %s ===\n", filename);
   printf("Compression: %s\n", r->is_zstd ? "zstd" : "none");
   printf("Format version: %u\n", version);
   printf("vCPU ID: %u\n", vcpu_id);
-  if (version >= 2) {
-    printf("Value capture: enabled\n");
-  }
+  printf("Arch: %s\n", arch == 1 ? "aarch64" : "x86_64");
+  printf("PA capture: %s\n", file_has_pa ? "yes" : "no");
+  printf("Value capture: %s (cap %u bytes)\n",
+         file_has_vals ? "enabled" : "disabled",
+         value_cap);
   printf("\n");
 
   /* Statistics */
@@ -337,6 +368,9 @@ int main(int argc, char **argv)
   bool     has_prev       = false;
 
   uint64_t mem_size_dist[7] = {0};
+  uint64_t pa_valid_count  = 0;
+  uint64_t pa_io_count     = 0;
+  uint64_t isz_not4_count  = 0;   /* aarch64 sanity: non-A64-width insns */
 
   while (1) {
     if (max_insns > 0 && total_insns >= max_insns) {
@@ -366,6 +400,10 @@ int main(int argc, char **argv)
               total_insns,
               nmem);
       break;
+    }
+
+    if (arch == 1 && isz != 4) {
+      isz_not4_count++;
     }
 
     uint64_t ip;
@@ -404,12 +442,15 @@ int main(int argc, char **argv)
     /* Read memory operations */
     for (int m = 0; m < nmem; m++) {
       uint64_t maddr;
+      uint64_t mpaddr = 0;
       uint8_t  msize;
       uint8_t  mflags;
 
-      if (!reader_read_exact(r, &maddr, 8) ||
-          !reader_read_exact(r, &msize, 1) ||
+      if (!reader_read_exact(r, &maddr, 8)) goto trunc_memop;
+      if (file_has_pa && !reader_read_exact(r, &mpaddr, 8)) goto trunc_memop;
+      if (!reader_read_exact(r, &msize, 1) ||
           !reader_read_exact(r, &mflags, 1)) {
+      trunc_memop:
         fprintf(stderr,
                 "ERROR: truncated mem op at insn #%" PRIu64 "\n",
                 total_insns);
@@ -418,6 +459,18 @@ int main(int argc, char **argv)
 
       bool is_write  = (mflags & 0x1) != 0;
       bool has_value = (mflags & 0x2) != 0;
+      bool pa_valid  = (mflags & 0x4) != 0;
+      bool pa_is_io  = (mflags & 0x8) != 0;
+
+      if (has_value && !file_has_vals) {
+        fprintf(stderr,
+                "ERROR: corrupt file — mem op sets has_value but header "
+                "has_values=0 (insn #%" PRIu64 ")\n",
+                total_insns);
+        goto done;
+      }
+      if (pa_valid) pa_valid_count++;
+      if (pa_is_io) pa_io_count++;
 
       /* Size distribution */
       int     size_idx = 0;
@@ -430,6 +483,12 @@ int main(int argc, char **argv)
 
       if (verbose) {
         printf("  %s[%uB]@0x%" PRIx64, is_write ? "W" : "R", msize, maddr);
+        if (file_has_pa) {
+          printf(" PA=0x%" PRIx64 "%s%s",
+                 mpaddr,
+                 pa_valid ? "" : "[invalid]",
+                 pa_is_io ? "[io]" : "");
+        }
       }
 
       if (has_value) {
@@ -498,6 +557,20 @@ done:
          total_insns ? 100.0 * branch_count / total_insns : 0);
   printf("Avg mem ops/insn:       %.2f\n",
          total_insns ? (double)total_mem_ops / total_insns : 0);
+
+  if (file_has_pa) {
+    printf("PA valid:               %" PRIu64 " (%.1f%%)\n",
+           pa_valid_count,
+           total_mem_ops ? 100.0 * pa_valid_count / total_mem_ops : 0);
+    printf("PA is MMIO:             %" PRIu64 "\n", pa_io_count);
+  }
+  if (arch == 1) {
+    printf("sanity: instr_size!=4 in %" PRIu64 "/%" PRIu64
+           " records (%.2f%%)\n",
+           isz_not4_count,
+           total_insns,
+           total_insns ? 100.0 * isz_not4_count / total_insns : 0);
+  }
 
   printf("\nMemory access size distribution:\n");
   const char *size_labels[] = {"1B", "2B", "4B", "8B", "16B", "32B", "64B"};
