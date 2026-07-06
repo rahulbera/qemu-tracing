@@ -521,15 +521,51 @@ int main(int argc, char **argv)
   memcpy(&version, file_hdr + 4, 4);
   memcpy(&vcpu_id, file_hdr + 8, 4);
 
+  if (version != 2 && version != 3) {
+    fprintf(stderr,
+            "ERROR: unsupported format version %u (supported: 2, 3)\n",
+            version);
+    reader_close(r);
+    if (w) writer_close(w);
+    return 1;
+  }
+
+  uint8_t arch        = 0;
+  bool    file_has_pa = false;
+  if (version == 3) {
+    arch        = file_hdr[12];
+    file_has_pa = (file_hdr[13] & 0x1) != 0;
+    if (arch == 1) {
+      fprintf(stderr,
+              "ERROR: arch=aarch64 — idle-loop filtering for AArch64 is not "
+              "yet supported (WFI/WFE semantics and the HLT->HLT idle "
+              "heuristic need validation on real A64 traces; see "
+              "docs/superpowers/specs/2026-07-06-aarch64-capture-kit-design.md).\n"
+              "Refusing to run rather than silently filtering nothing.\n");
+      reader_close(r);
+      if (w) writer_close(w);
+      return 1;
+    }
+    if (arch != 0) {
+      fprintf(stderr,
+              "ERROR: unknown arch byte %u (supported: 0=x86_64, 1=aarch64)\n",
+              arch);
+      reader_close(r);
+      if (w) writer_close(w);
+      return 1;
+    }
+  }
+
   fprintf(stderr,
-          "[trace_filter] input=%s version=%u vcpu=%u%s\n",
-          input_path,
-          version,
-          vcpu_id,
+          "[trace_filter] input=%s version=%u vcpu=%u arch=x86_64 "
+          "has_pa=%d idle-opcode=HLT(0xF4)%s\n",
+          input_path, version, vcpu_id, file_has_pa ? 1 : 0,
           stats_only ? " [stats-only]" : "");
   if (w) {
     fprintf(stderr, "[trace_filter] output=%s zstd_level=%d\n", output_path,
             ZSTD_LEVEL);
+    /* NOTE: the 16-byte header is ECHOED verbatim, not regenerated. If a
+       future option strips PAs, the flags byte must be rewritten here. */
     writer_append(w, file_hdr, 16);
   }
 
@@ -560,9 +596,11 @@ int main(int argc, char **argv)
   uint32_t *idle_samples = malloc(sample_cap * sizeof(uint32_t));
   size_t   sample_used = 0;
 
-  /* Scratch buffer for one record's serialized bytes */
+  /* Scratch buffer for one record's serialized bytes — sized for the v3
+     format-ceiling worst case (601 B) so a future value_cap>16 file
+     needs no reader change (spec 3.4/4.5). */
   uint8_t  rec_buf[4 + 8 + MAX_INSN_SIZE +
-                  MAX_MEM_OPS * (8 + 1 + 1 + MAX_VALUE_SIZE)];
+                  MAX_MEM_OPS * (8 + 8 + 1 + 1 + MAX_VALUE_SIZE)];
 
   struct timespec t_start;
   clock_gettime(CLOCK_MONOTONIC, &t_start);
@@ -620,15 +658,19 @@ int main(int argc, char **argv)
     /* Memory ops */
     bool truncated = false;
     for (int m = 0; m < nmem; m++) {
-      uint8_t mhdr[10];
-      if (!reader_read_exact(r, mhdr, 10)) {
+      /* v2: VA(8)+size(1)+flags(1) = 10 bytes.
+         v3 has_pa: VA(8)+PA(8)+size(1)+flags(1) = 18 bytes.
+         Copied verbatim into rec_buf either way — framing only. */
+      uint8_t mhdr[18];
+      size_t  mlen = file_has_pa ? 18 : 10;
+      if (!reader_read_exact(r, mhdr, mlen)) {
         truncated = true;
         break;
       }
-      uint8_t msize  = mhdr[8];
-      uint8_t mflags = mhdr[9];
-      memcpy(rec_buf + rec_pos, mhdr, 10);
-      rec_pos += 10;
+      uint8_t msize  = mhdr[mlen - 2];
+      uint8_t mflags = mhdr[mlen - 1];
+      memcpy(rec_buf + rec_pos, mhdr, mlen);
+      rec_pos += mlen;
 
       if (mflags & 0x2) {
         uint8_t vbytes = (msize <= MAX_VALUE_SIZE) ? msize : MAX_VALUE_SIZE;
