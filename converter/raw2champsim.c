@@ -666,12 +666,13 @@ int main(int argc, char **argv)
     return 1;
   }
 
-  /* Read file header */
-  uint32_t magic, version, vcpu_id, file_reserved;
+  /* Read file header: three u32s + four individual bytes */
+  uint32_t magic, version, vcpu_id;
+  uint8_t  hdr_tail[4];
   if (!reader_read_exact(reader, &magic, 4) ||
       !reader_read_exact(reader, &version, 4) ||
       !reader_read_exact(reader, &vcpu_id, 4) ||
-      !reader_read_exact(reader, &file_reserved, 4)) {
+      !reader_read_exact(reader, hdr_tail, 4)) {
     fprintf(stderr, "ERROR: Cannot read file header\n");
     reader_close(reader);
     return 1;
@@ -684,9 +685,41 @@ int main(int argc, char **argv)
     return 1;
   }
 
+  if (version != 2 && version != 3) {
+    fprintf(stderr, "ERROR: Unsupported format version %u (supported: 2, 3)\n",
+            version);
+    reader_close(reader);
+    return 1;
+  }
+
+  uint8_t arch          = 0;
+  bool    file_has_pa   = false;
+  bool    file_has_vals = true;
+  if (version == 3) {
+    arch          = hdr_tail[0];
+    file_has_pa   = (hdr_tail[1] & 0x1) != 0;
+    file_has_vals = (hdr_tail[1] & 0x2) != 0;
+    if (arch == 1) {
+      fprintf(stderr,
+              "ERROR: arch=aarch64 — this converter decodes x86 only "
+              "(Zydis). AArch64 (Capstone) support is the next spec; see "
+              "docs/superpowers/specs/2026-07-06-aarch64-capture-kit-design.md\n");
+      reader_close(reader);
+      return 1;
+    }
+    if (arch != 0) {
+      fprintf(stderr,
+              "ERROR: Unknown arch byte %u (supported: 0=x86_64, 1=aarch64)\n",
+              arch);
+      reader_close(reader);
+      return 1;
+    }
+  }
+
   printf("Input:   %s\n", input_file);
   printf("Output:  %s\n", output_file);
-  printf("Format:  v%u, vCPU %u\n", version, vcpu_id);
+  printf("Format:  v%u, vCPU %u, arch x86_64, PA %s\n",
+         version, vcpu_id, file_has_pa ? "captured" : "absent");
   printf("Compression level: %d\n", ZSTD_COMP_LEVEL);
   printf("\n");
 
@@ -754,10 +787,13 @@ int main(int argc, char **argv)
     /* Read memory operations */
     typedef struct {
       uint64_t addr;
+      uint64_t paddr;
       uint8_t  size;
       uint8_t  flags;
       bool     is_write;
       bool     has_value;
+      bool     pa_valid;
+      bool     pa_is_io;
       uint8_t  value[RAW_MAX_VALUE_SIZE];
       uint8_t  value_len;
     } RawMemOp;
@@ -767,9 +803,16 @@ int main(int argc, char **argv)
     int      num_writes = 0;
 
     for (int m = 0; m < nmem; m++) {
-      if (!reader_read_exact(reader, &mem_ops[m].addr, 8) ||
-          !reader_read_exact(reader, &mem_ops[m].size, 1) ||
+      mem_ops[m].paddr    = 0;
+      mem_ops[m].pa_valid = false;
+      mem_ops[m].pa_is_io = false;
+
+      if (!reader_read_exact(reader, &mem_ops[m].addr, 8)) goto trunc_memop;
+      if (file_has_pa &&
+          !reader_read_exact(reader, &mem_ops[m].paddr, 8)) goto trunc_memop;
+      if (!reader_read_exact(reader, &mem_ops[m].size, 1) ||
           !reader_read_exact(reader, &mem_ops[m].flags, 1)) {
+      trunc_memop:
         fprintf(stderr, "ERROR: truncated mem op at insn #%" PRIu64 "\n",
                 stats.total_insns);
         goto done;
@@ -777,7 +820,17 @@ int main(int argc, char **argv)
 
       mem_ops[m].is_write  = (mem_ops[m].flags & 0x1) != 0;
       mem_ops[m].has_value = (mem_ops[m].flags & 0x2) != 0;
+      mem_ops[m].pa_valid  = (mem_ops[m].flags & 0x4) != 0;
+      mem_ops[m].pa_is_io  = (mem_ops[m].flags & 0x8) != 0;
       mem_ops[m].value_len = 0;
+
+      if (mem_ops[m].has_value && !file_has_vals) {
+        fprintf(stderr,
+                "ERROR: corrupt file — has_value set but header "
+                "has_values=0 (insn #%" PRIu64 ")\n",
+                stats.total_insns);
+        goto done;
+      }
 
       if (mem_ops[m].has_value) {
         uint8_t vbytes = mem_ops[m].size;
@@ -929,7 +982,9 @@ int main(int argc, char **argv)
         if (dst_mem_idx < NUM_INSTR_DESTINATIONS) {
           rec.destination_memory[dst_mem_idx]      = mem_ops[m].addr;
           rec.destination_memory_size[dst_mem_idx]  = mem_ops[m].size;
-          /* PA: zero for now (raw traces don't capture PA) */
+          if (mem_ops[m].pa_valid && !mem_ops[m].pa_is_io) {
+            rec.destination_memory_pa[dst_mem_idx] = mem_ops[m].paddr;
+          }
           if (mem_ops[m].has_value && mem_ops[m].value_len > 0) {
             uint8_t copy_len = mem_ops[m].value_len;
             if (copy_len > MAX_MEM_VALUE_SIZE) copy_len = MAX_MEM_VALUE_SIZE;
@@ -944,6 +999,9 @@ int main(int argc, char **argv)
         if (src_mem_idx < NUM_INSTR_SOURCES) {
           rec.source_memory[src_mem_idx]      = mem_ops[m].addr;
           rec.source_memory_size[src_mem_idx]  = mem_ops[m].size;
+          if (mem_ops[m].pa_valid && !mem_ops[m].pa_is_io) {
+            rec.source_memory_pa[src_mem_idx] = mem_ops[m].paddr;
+          }
           if (mem_ops[m].has_value && mem_ops[m].value_len > 0) {
             uint8_t copy_len = mem_ops[m].value_len;
             if (copy_len > MAX_MEM_VALUE_SIZE) copy_len = MAX_MEM_VALUE_SIZE;
