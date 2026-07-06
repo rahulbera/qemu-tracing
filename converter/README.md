@@ -58,6 +58,18 @@ not RAM, so they're left zero); a failed hwaddr lookup or a v2 input
 (which has no PA at all) also leaves the slot at zero, same as before
 this converter had any PA source.
 
+**Rotated chunks convert independently.** A raw capture taken with the
+plugin's `rotate=N` (see `plugin/README.md`) produces
+`trace_vcpu<V>_c<K>.raw.zst` chunk files instead of one monolith; each
+converts on its own with no code change, and the `_c<K>` suffix is
+carried through to the output name (`…_c00000.raw.zst` →
+`…_c00000.champsim.zst`) by the same `.raw.zst`→`.champsim.zst`
+suffix replacement used for un-rotated files. Caveat: `branch_taken` is
+set by looking ahead to the next instruction's IP, so the last
+instruction of each chunk is written `branch_taken=0` (no cross-file
+look-ahead) — bounded to at most one instruction per chunk boundary;
+convert the concatenated (un-rotated) stream instead for exact parity.
+
 **v3/aarch64 input is a clean error** — AArch64 decode is
 Capstone-based work for a subsequent spec/converter, not yet
 implemented here (see

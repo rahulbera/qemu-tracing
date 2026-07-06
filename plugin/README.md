@@ -108,6 +108,7 @@ vcpu_id) keep the existing host-little-endian memcpy convention.
 | `arch=` | `auto` \| `x86_64` \| `aarch64` | `auto` | `auto` resolves from the QEMU target at install time; an explicit value overrides detection (a mismatch logs a prominent warning but honors the override). An unknown target under `auto` is a **fatal install error** — the plugin never guesses the privilege threshold |
 | `capture_pa=` | `on` \| `off` \| `1` \| `0` | `on` | capture each mem-op's guest physical address via `qemu_plugin_get_hwaddr`. `off` genuinely skips the hwaddr call (it costs a TLB walk per access), not just the record bytes |
 | `values=` | `on` \| `off` \| `1` \| `0` | `on` | capture memory values via `qemu_plugin_mem_get_value`. `off` means no mem-op ever sets `has_value`, and the header's `flags.has_values=0`/`value_cap=0` |
+| `rotate=<N>` | integer | `0` = off | close the current per-vCPU chunk and open a fresh one every N traced instructions on that vCPU. See "Rotation" below |
 
 **`value_cap` semantics — the honest provision.** Header byte 14
 records the *effective* value-capture cap of the build that wrote the
@@ -131,6 +132,63 @@ v2-emission mode — but `trace_inspector`, `trace_filter`, and
 to read existing v2 files on disk forever (decoded as `arch=x86_64`,
 no PA/value_cap fields). You do not need to re-capture or convert old
 traces after upgrading the plugin.
+
+**Rotation (`rotate=N`).** Off by default (`rotate=0`, or the knob
+absent) — behavior is byte-for-byte identical to the pre-rotation
+plugin: one `trace_vcpu<V>.raw.zst` per traced vCPU, no chunk index, no
+manifest. With `rotate=N` (N>0), the plugin closes the current chunk
+and opens a fresh one every N *traced* instructions on that vCPU,
+counted independently per vCPU (chunk boundaries need not line up
+across vCPUs). Rotation is orthogonal to `limit=` (which still means
+"stop tracing at M instructions total") and to `trigger=` (the dormant
+pre-trigger phase consumes no chunk instructions).
+
+- **Naming.** When rotating, every chunk — including the first — is
+  named `trace_vcpu<V>_c<KKKKK>.raw.zst`: `_c` is a "contiguous chunk"
+  token, deliberately distinct from the PIN tracer's skip-gapped
+  `_s<sid>` samples (rotation cuts a contiguous stream with no
+  inter-chunk gap; PIN's `_s` samples skip instructions between them).
+  `<KKKKK>` is the 0-indexed chunk counter, zero-padded to 5 digits
+  (`%05u`), so a directory listing sorts correctly up to 100 000
+  chunks. When `rotate=0`, the filename is the unchanged plain
+  `trace_vcpu<V>.raw.zst` — no `_c` suffix ever appears in non-rotated
+  output.
+- **Manifest.** When rotating, each traced vCPU also gets a
+  `trace_vcpu<V>_manifest.txt`: a header comment line
+  (`# vcpu <V> rotation manifest: chunk file start_insn insn_count
+  comp_bytes`) followed by one row per **non-empty** chunk, columns
+  `chunk file start_insn insn_count comp_bytes`. `comp_bytes` is the
+  chunk file's exact on-disk (compressed) size. A line is appended only
+  after its chunk's zstd stream is finalized and the file closed, so a
+  manifest line guarantees that chunk is complete and valid. The manifest
+  is only written when `rotate>0`. The one exception: if the trigger
+  never fires, chunk 0's file exists on disk (header only, finalized at
+  exit) but is *not* listed in the manifest — directory-glob consumers
+  will see one more file than manifest-driven consumers.
+- **Every chunk is a standalone v3 file.** No changes were needed in
+  `trace_inspector`, `trace_filter`, or `converter/raw2champsim` — each
+  chunk carries its own valid 16-byte v3 header and can be inspected,
+  filtered, or converted exactly like an un-rotated `trace_vcpu<V>.raw.zst`.
+- **Two stateful-consumer caveats.** Both tools below process a single
+  file's record stream with a small amount of cross-record state, and
+  that state resets at each chunk boundary instead of carrying across
+  chunks. Neither is a correctness bug in rotation; both are bounded
+  and documented here rather than "fixed" (fixing them would mean
+  teaching the readers about chunk sequences, which the design
+  deliberately avoids):
+  - `trace_filter`'s HLT→HLT idle-loop detector resets to ACTIVE at the
+    start of every file, so an idle iteration that straddles a chunk
+    boundary is not filtered — an under-filter of at most one idle
+    iteration per boundary (~1 per 100 M instructions at the capture
+    kit's default chunk size). For exact whole-stream filtering parity,
+    concatenate the chunks first, then filter.
+  - `raw2champsim` sets `branch_taken` by looking ahead to the next
+    instruction's IP, so the *last* instruction of every chunk is
+    written with `branch_taken=0` (there is no next record to look
+    ahead to within that file). This mismarks a taken branch that lands
+    on a chunk's final instruction — bounded to at most one instruction
+    per chunk boundary. For exact parity, convert the concatenated
+    (un-rotated) stream instead of converting chunks independently.
 
 **Install-time banner.** Every run prints its exact capture
 configuration to stderr, including the plugin's own build identity:

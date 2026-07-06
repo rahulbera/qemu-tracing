@@ -120,8 +120,49 @@ values are wrong or you want something different:
 | `PLUGIN=` | path to `champsim_tracer.so` | `../../plugin/champsim_tracer.so` |
 | `VCPUS=` | which vCPUs to trace (`0`, `0-3`, `0,2`) | `0` |
 | `LIMIT=` | instructions to capture per traced vCPU | `1000000000` |
+| `ROTATE=` | instructions per chunk before rotating to a fresh file (`0` disables) | `100000000` |
 
 Example: `VCPUS=0-3 LIMIT=20000000 ./configure_tracer.sh guest_config.txt /data/traces`
+
+### Rotation is on by default
+
+`configure_tracer.sh` always threads `,rotate=$ROTATE` into the
+generated `run_trace.sh` and records `ROTATE=$ROTATE` in
+`trace_metadata.txt` — at the default `100000000`, a capture at this
+kit's scale (potentially hundreds of billions of instructions) lands as
+a series of `trace_vcpu<N>_c00000.raw.zst`, `_c00001.raw.zst`, ... files
+instead of one monolith. This is deliberate, not incidental: it bounds
+each file's size, bounds the blast radius of a corrupted chunk or a
+process killed mid-capture to that one chunk instead of the whole run,
+and lets post-processing start on early chunks while later ones are
+still being written. Set `ROTATE=0` to disable and get the old
+single-`trace_vcpu<N>.raw.zst`-per-vCPU behavior, or `ROTATE=<N>` for a
+different chunk size. Full naming and manifest format:
+`plugin/README.md`.
+
+Each traced vCPU also gets a `trace_vcpu<N>_manifest.txt` listing every
+non-empty chunk's `start_insn`/`insn_count`/`comp_bytes` — it ships
+alongside the chunks and `trace_metadata.txt` in the output directory.
+To assemble a ChampSim run of a given size (a typical run uses
+~500–600 M instructions) out of a 100 M-per-chunk capture, pick
+contiguous chunks from the manifest whose `insn_count` sums to your
+target:
+
+```
+# vcpu 0 rotation manifest: chunk file start_insn insn_count comp_bytes
+0 trace_vcpu0_c00000.raw.zst 0 100000000 2807123
+1 trace_vcpu0_c00001.raw.zst 100000000 100000000 2799881
+2 trace_vcpu0_c00002.raw.zst 200000000 100000000 2812004
+3 trace_vcpu0_c00003.raw.zst 300000000 100000000 2795511
+4 trace_vcpu0_c00004.raw.zst 400000000 100000000 2803347
+5 trace_vcpu0_c00005.raw.zst 500000000 100000000 2431901
+```
+
+Chunks 0–4 (`start_insn=0` through `500000000`, 500 M instructions) or
+0–5 (600 M) are both contiguous ranges starting at instruction 0 — feed
+those `.raw.zst` files to `trace_filter`/`raw2champsim` for your run
+(see `converter/README.md` for the independent-vs-concatenated
+conversion tradeoff).
 
 `configure_tracer.sh` hard-checks QEMU ≥ 9.1 and that the plugin `.so`
 exists before writing anything, and tells you exactly how to fix it if

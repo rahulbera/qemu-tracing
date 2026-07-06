@@ -327,6 +327,24 @@ New plugin knobs beyond v2's `outdir=`/`vcpus=`/`limit=`/`trigger=`:
 target), `capture_pa=on|off` (default `on`), `values=on|off` (default
 `on`). Full knob and format reference: `plugin/README.md`.
 
+**Online rotation (`rotate=N`, optional, default off).** The plugin
+can also chunk its own output as it captures: with `rotate=N` (N>0), it
+closes the current per-vCPU chunk and opens a fresh one every N traced
+instructions on that vCPU, counted independently per vCPU. Chunk files
+are named `trace_vcpu<V>_c<KKKKK>.raw.zst` (`_c` = contiguous chunk,
+0-indexed, zero-padded to 5 digits) instead of the plain
+`trace_vcpu<V>.raw.zst` used when rotation is off, and each traced vCPU
+gets a companion `trace_vcpu<V>_manifest.txt` recording every non-empty
+chunk's start instruction, instruction count, and exact compressed
+size. Every chunk is a standalone v3 file — no changes needed in
+`trace_inspector`, `trace_filter`, or `converter/raw2champsim`. This
+exists for the AArch64 capture kit's very large captures (the kit
+defaults it on, at 100 M instructions/chunk); the plugin's own default
+stays off so existing single-file x86_64 usage is unaffected. Full
+naming/manifest details and the two bounded stateful-consumer caveats
+(idle-filter reset and last-instruction `branch_taken` at chunk
+boundaries): `plugin/README.md`.
+
 ## ChampSim Trace Format (Target)
 
 Vanilla ChampSim `input_instr` struct (~64 bytes per instruction):
