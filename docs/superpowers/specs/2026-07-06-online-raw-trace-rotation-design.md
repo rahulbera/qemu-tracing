@@ -69,9 +69,11 @@ any reader.
   valid file, finalized at plugin exit; its true length is recorded in the
   manifest.
 - **Boundary is strictly between instructions.** Rotation is evaluated in
-  `insn_exec_cb` immediately after `finalize_pending_insn` has committed the
-  previous instruction to the closing chunk, and before the next pending
-  instruction is assembled. No record is ever split across chunks.
+  `insn_exec_cb` after `finalize_pending_insn` has committed the previous
+  instruction to the closing chunk **and after the `limit=` check** (so no
+  chunk is opened once tracing has already stopped), and before the next
+  pending instruction is assembled. This ordering is the single source of
+  truth — §5.3 uses identical language. No record is ever split across chunks.
 
 ---
 
@@ -125,6 +127,15 @@ finalized and its file `fclose`d. Therefore a line's presence guarantees that
 chunk is complete and valid — which is exactly the resilience the feature is
 for. `fflush` follows each append so completed chunks survive a later crash.
 
+**Empty chunks are never recorded.** `close_chunk` appends a manifest line only
+when `chunk_insn_count > 0`. The only chunk that can be empty is chunk 0 when
+the trigger never fires (every post-rotation chunk receives at least the one
+instruction assembled in the same callback that opened it). That header-only
+chunk-0 file still exists on disk (finalized normally at exit) but is **absent
+from the manifest** — a distinction directory-glob consumers should note (the
+manifest lists only non-empty chunks; the directory may contain one extra
+header-only file).
+
 ### 4.3 Format
 
 Plain text, one header comment line, then one whitespace-delimited row per
@@ -158,22 +169,35 @@ recorded as a completed chunk). Manifest is only produced when `rotate > 0`.
 
 ### 5.1 Refactor: `open_chunk` / `close_chunk`
 
-The file-open + cctx-create + 16-byte-header-write block currently inlined in
-the `qemu_plugin_install` per-vCPU loop (`champsim_tracer.c:1041–1084`), and the
-symmetric finalize + `fclose` + `ZSTD_freeCCtx` currently inlined in
-`plugin_atexit`, are factored into two helpers reused by install, rotation, and
-atexit:
+The **per-chunk** part of the setup — `ZSTD_createCCtx` + level/checksum params
+(`champsim_tracer.c:1051–1060`), filename `snprintf` (1062–1064), `fopen`
+(1066), and the 16-byte v3 header build + `buffer_append` writes (1074–1088) —
+is factored into `open_chunk`, and the symmetric per-chunk teardown currently
+inlined in `plugin_atexit` (`finalize`-then-`flush_final` + `fclose` +
+`ZSTD_freeCCtx`) into `close_chunk`. **The one-time per-vCPU init stays in the
+install loop and must NOT move into `open_chunk`:** the `memset(vs, 0, …)`
+(1042), `vs->vcpu_id = i` (1043), and the `inbuf`/`outbuf` `g_malloc`s
+(1045–1049) run once — re-running the `memset` per rotation would wipe the
+cumulative `insn_count`/stats and the new `chunk_*` fields, and re-running the
+`g_malloc`s would leak `inbuf`/`outbuf` every rotation.
 
-- **`static bool open_chunk(VcpuState *vs)`** — create `cctx`, set level +
-  checksum params, build the filename (with `_c<K>` when `rotate>0`, plain when
-  off), `fopen`, write the v3 header (via the existing `buffer_append` path so
-  it enters the zstd stream), reset `inbuf_pos=0`, `chunk_insn_count=0`,
-  `chunk_bytes_compressed=0`. Returns false on open/cctx failure. The v3 header
-  fields (arch, flags, value_cap) are identical for every chunk of a run.
+- **`static bool open_chunk(VcpuState *vs)`** — set `inbuf_pos = 0` first, then
+  create `cctx`, set level + checksum params, build the filename (with `_c<K>`
+  when `rotate>0`, plain when off), `fopen`, write the v3 header (via the
+  existing `buffer_append` path so it enters the zstd stream). Also initialize
+  all per-chunk bookkeeping here, so `open_chunk` is the single owner of it:
+  `chunk_insn_count = 0`, `chunk_start_insn = vs->insn_count` (0 at install,
+  the running cumulative count at each rotation), `chunk_bytes_at_open =
+  vs->bytes_compressed` (snapshot for the per-chunk byte delta). Returns false
+  on open/cctx failure. The v3 header fields (arch, flags, value_cap) are
+  identical for every chunk of a run.
 - **`static void close_chunk(VcpuState *vs)`** — `flush_final(vs)` (flushes the
   input buffer and ends the zstd frame), `fclose(vs->outfile)`,
-  `ZSTD_freeCCtx(vs->cctx)`, null both; then, when `rotate>0` and a manifest is
-  open, append this chunk's manifest line and `fflush`.
+  `ZSTD_freeCCtx(vs->cctx)`, null both; then, when `rotate>0` **and**
+  `manifest_fp != NULL` **and** `chunk_insn_count > 0`, append this chunk's
+  manifest line (with `comp_bytes = vs->bytes_compressed - chunk_bytes_at_open`)
+  and `fflush`. The `chunk_insn_count > 0` guard suppresses the sole
+  empty-chunk case (chunk 0 when the trigger never fires — see §4.3/§9).
 
 The install loop calls `open_chunk` for chunk 0 (and opens the manifest file
 first, when rotating). `plugin_atexit` calls `finalize_pending_insn` then
@@ -186,14 +210,16 @@ inline finalize/close it does today.
 
 - `uint32_t chunk_index` — current chunk number (0-based).
 - `uint64_t chunk_insn_count` — instructions written to the current chunk;
-  resets to 0 in `open_chunk`.
+  reset to 0 in `open_chunk`; incremented in `finalize_pending_insn` alongside
+  `insn_count`.
 - `uint64_t chunk_start_insn` — cumulative instruction index at the current
-  chunk's start (for the manifest `start_insn` column).
-- `uint64_t chunk_bytes_compressed` — compressed bytes for the current chunk
-  (for the manifest `comp_bytes` column). Note `flush_buffer`/`flush_final`
-  already accumulate `bytes_compressed` cumulatively; the per-chunk counter is
-  derived (e.g. snapshot cumulative at chunk open, subtract at close) or tracked
-  in parallel — implementation detail, either is acceptable.
+  chunk's start (manifest `start_insn`), set in `open_chunk`.
+- `uint64_t chunk_bytes_at_open` — snapshot of cumulative `bytes_compressed`
+  taken in `open_chunk`; the per-chunk `comp_bytes` is
+  `bytes_compressed - chunk_bytes_at_open`, computed in `close_chunk` after
+  `flush_final`. This snapshot-and-subtract method is chosen (over a parallel
+  per-chunk counter) precisely so `flush_buffer`/`flush_final` need **no**
+  change — they keep incrementing only the cumulative `bytes_compressed`.
 - `FILE *manifest_fp` — the vCPU's manifest file (NULL when `rotate=0`).
 
 The existing cumulative `insn_count`, `mem_op_count`, `values_captured`,
@@ -210,17 +236,20 @@ counter bump, and **after** the `limit` check (so a rotation is not opened when
 tracing has just stopped), and before the new pending instruction:
 
 ```c
-finalize_pending_insn(vs);                 /* commits prev insn into current chunk */
+finalize_pending_insn(vs);                 /* commits prev insn into current chunk;
+                                              increments insn_count AND chunk_insn_count */
 if (insn_limit > 0 && vs->insn_count >= insn_limit) { ...stop...; return; }
 if (rotate_interval > 0 &&
     vs->chunk_insn_count >= rotate_interval) {
-    close_chunk(vs);
+    close_chunk(vs);                       /* finalizes + manifest line for the closing chunk */
     vs->chunk_index++;
-    vs->chunk_start_insn = vs->insn_count;
-    open_chunk(vs);
+    open_chunk(vs);                        /* owns chunk_start_insn / chunk_insn_count / snapshot */
 }
 /* ...assemble new pending insn... */
 ```
+
+(`chunk_start_insn` is set inside `open_chunk`, not here — `open_chunk` is the
+single owner of per-chunk field initialization.)
 
 `finalize_pending_insn` increments `chunk_insn_count` alongside `insn_count`
 (one added line). Because `finalize` has already appended the previous
@@ -243,11 +272,15 @@ in by default so it reaches him without extra steps (the plugin knob itself
 stays default-off, preserving existing single-file x86 users):
 
 - `configure_tracer.sh` gains a `ROTATE` env override, **default
-  `100000000`** (100 M instructions/chunk). It threads `rotate=$ROTATE` into the
-  generated `run_trace.sh` plugin knob string and records `ROTATE=<value>` in
-  `trace_metadata.txt`.
-- Setting `ROTATE=0` at configure time omits `rotate=` (or emits `rotate=0`),
-  giving single-file behavior.
+  `100000000`** (100 M instructions/chunk). It **always** threads
+  `,rotate=$ROTATE` into the generated `run_trace.sh` plugin knob string (a
+  single clean heredoc insertion) and adds `ROTATE=$ROTATE` to the
+  `trace_metadata.txt` sidecar heredoc (an additive key; the sidecar has no
+  key-count-sensitive consumer — it is copied wholesale).
+- Setting `ROTATE=0` at configure time emits `rotate=0`, which the plugin
+  already treats as off (§2.1) — single-file behavior. We always emit the knob
+  (rather than conditionally omitting it) to keep the generation a one-line
+  insertion and the sidecar key set consistent.
 
 100 M is a deliberate default: 5–6 chunks compose the ~500–600 M a ChampSim run
 uses, and each chunk is a few GB at v3 density — small enough to post-process
@@ -265,10 +298,31 @@ incrementally and to bound corruption blast radius.
   the manifest (`start_insn`/`insn_count` columns).
 - `converter/README.md` — one line: rotated chunks are converted independently
   (`raw2champsim <chunk>.raw.zst` → `<chunk>.champsim.zst`); the `_c<K>` suffix
-  is carried through.
+  is carried through. **Caveat to document:** `raw2champsim` sets
+  `branch_taken` by look-ahead to the next instruction's IP, and the last
+  instruction of any file is written with `branch_taken=0` (no cross-file
+  look-ahead). Converting chunks independently therefore mismarks a taken
+  branch that lands on a chunk's final instruction — bounded to one instruction
+  per chunk boundary (statistically negligible at 100 M/chunk). For exact
+  parity, convert the concatenated stream.
 - `CLAUDE.md` — a rotation note in the raw-format section.
 
-No changes to `trace_inspector`, `trace_filter`, or `raw2champsim` source.
+**No changes to `trace_inspector`, `trace_filter`, or `raw2champsim` source** —
+each chunk is a standalone v3 file. Two stateful-across-records caveats must be
+documented (not code-fixed):
+
+- **`trace_filter` is stateful (HLT→HLT idle detection).** It resets to ACTIVE
+  at each file's start and conservatively keeps any in-flight idle candidate at
+  EOF, so an idle iteration straddling a chunk boundary is not filtered — a
+  bounded under-filter of at most one idle iteration per boundary (~1 per 100 M
+  instructions at the default). No crash or corruption. For exact whole-stream
+  filtering parity, filter the concatenated (un-rotated) stream.
+- **`raw2champsim` branch look-ahead** — the per-boundary `branch_taken=0`
+  caveat above.
+
+Both are inherent to per-chunk (vs whole-stream) processing of a stateful
+consumer; they are documented and accepted, not defects in the rotation
+feature.
 
 ---
 
@@ -279,13 +333,26 @@ No changes to `trace_inspector`, `trace_filter`, or `raw2champsim` source.
    `trace_vcpu0_c<K>.raw.zst` files + a `trace_vcpu0_manifest.txt`. Each chunk:
    `trace_inspector` clean, `version 3`, ~50000 instructions (last one partial),
    valid standalone header. Manifest: one row per chunk, `insn_count` values sum
-   to the total, `start_insn` values are the running sum, `comp_bytes` match the
-   on-disk file sizes within the compressor's flush granularity.
-2. **Lossless cut.** Decompress and concatenate the chunk record streams (strip
-   each chunk's 16-byte header, concatenate the record bodies) and compare
-   byte-for-byte against a `rotate=0` single-file capture of the *same* run
-   (same seed/inputs, deterministic BIOS boot). They must be identical — proves
-   the cut is lossless and lands on a record boundary.
+   to the total traced, `start_insn` values are the running sum starting at 0,
+   and each `comp_bytes` **equals the chunk file's on-disk `stat` size exactly**
+   (the zstd frame is fully finalized with `ZSTD_e_end` before the count is
+   recorded, and `bytes_compressed` is the exact running sum of every `fwrite`
+   `output.pos`; the only way they could diverge is an unchecked short write /
+   `ENOSPC`).
+2. **Lossless cut (self-contained).** Within the single rotated capture:
+   decompress each chunk, **strip its 16-byte header**, concatenate the record
+   bodies, and verify the result is a valid record stream whose instruction
+   count equals the manifest total and whose IP sequence is monotone-consistent
+   across boundaries (no split record: the concatenation length is an exact
+   multiple of the per-instruction record framing at every boundary). This is
+   self-contained — it does not diff two separate QEMU processes.
+   **Optional exact-parity variant (requires determinism):** compare
+   `strip_header(decompress(single rotate=0 file))` byte-for-byte against
+   `concat(strip_header(decompress(chunk_i)))`. Both headers must be stripped
+   (the rotate=0 file has its own). This diff is only valid under a
+   deterministic replay (`-icount`); without it, TCG interrupt/timer timing can
+   differ between the two processes and cause a false mismatch unrelated to
+   rotation, so the self-contained check above is the primary gate.
 3. **Backward compatibility.** `rotate=0` (and knob absent) → a single
    `trace_vcpu0.raw.zst`, no `_c` suffix, no manifest, byte-identical to the
    pre-feature plugin on the same run.
@@ -308,7 +375,7 @@ No changes to `trace_inspector`, `trace_filter`, or `raw2champsim` source.
 | Case | Behavior |
 |---|---|
 | `rotate=0` / knob absent | Exact current single-file behavior; no `_c`, no manifest |
-| Trigger never fires | Chunk 0 opened (header only) at install; manifest has header line only; atexit finalizes the empty chunk 0 file (as today) |
+| Trigger never fires | Chunk 0 opened (header only) at install; atexit finalizes the empty chunk-0 file (as today). The manifest contains **only its header comment** — `close_chunk`'s `chunk_insn_count > 0` guard omits the empty chunk. The header-only `_c00000` file exists on disk but is absent from the manifest (directory-glob vs manifest-driven consumers differ by that one file) |
 | Final partial chunk | Closed at `plugin_atexit` via `close_chunk`; its true `insn_count` recorded; exactly one manifest line, no double-append |
 | `rotate` > total insts | Single chunk `_c00000` + 1-row manifest |
 | `rotate` with `limit` | Rotation checked after the limit check, so no empty chunk is opened once tracing has stopped |
@@ -330,3 +397,21 @@ No changes to `trace_inspector`, `trace_filter`, or `raw2champsim` source.
   defaults for existing users).
 - No reader changes — each chunk is a standalone v3 file by construction.
 - Contiguous cut, trailing partial kept, boundary strictly between instructions.
+
+## 11. Adversarial review record
+
+Reviewed 2026-07-06 by three independent reviewers (consistency/ambiguity,
+source-implementability, edge/downstream). 15 findings — 1 blocker (spurious
+empty-chunk-0 manifest row), 7 should-fix, 7 nits — all incorporated:
+`close_chunk` guards the manifest append on `chunk_insn_count > 0`; §2.2/§5.3
+rotation-ordering language unified (after finalize *and* after the limit
+check); `open_chunk` is the sole owner of `chunk_start_insn`/`chunk_insn_count`
+init and resets `inbuf_pos` before the header write; per-chunk `comp_bytes` via
+`bytes_compressed` snapshot-subtract (no `flush_*` change) and asserted equal
+to the on-disk file size exactly; the factorable install region corrected to
+~1051–1088 (excluding the one-time `memset`/`g_malloc`s); the lossless-cut test
+made self-contained (with an `-icount`-gated exact-parity variant); and the
+`trace_filter` cross-chunk idle-state and `raw2champsim` last-instruction
+`branch_taken=0` boundary effects documented as bounded/accepted. Source facts
+verified: `raw2champsim` output naming (`strstr(".raw.zst")`) carries `_c<K>`
+through cleanly; `bytes_compressed` is the exact fwrite total.
