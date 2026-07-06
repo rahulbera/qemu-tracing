@@ -682,6 +682,12 @@ static void insn_exec_cb(unsigned int vcpu_index, void *userdata)
         vs->chunk_index++;
         if (!open_chunk(vs))
         {
+            /* open_chunk() returned before resetting chunk_insn_count, so it
+             * still holds the stale (>= rotate_interval) value from the
+             * chunk we just closed. Zero it so plugin_atexit's close_chunk
+             * call sees chunk_insn_count == 0 and skips appending a manifest
+             * row for a chunk file that was never created. */
+            vs->chunk_insn_count = 0;
             vs->limit_reached = true;   /* fail safe: stop this vCPU, keep prior chunks */
             return;
         }

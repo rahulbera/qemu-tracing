@@ -20,6 +20,7 @@ timeout 20 "$QEMU" \
     2> "$OUTDIR/plugin_stderr.log"
 
 F="$OUTDIR/trace_vcpu0.raw.zst"
+[ -f "$F" ] || F=$(ls "$OUTDIR"/trace_vcpu0_c*.raw.zst 2>/dev/null | head -1)
 if [ -f "$F" ] && [ "$(stat -c%s "$F")" -gt 1024 ]; then
     echo "OK: $F ($(stat -c%s "$F") bytes)"
     exit 0

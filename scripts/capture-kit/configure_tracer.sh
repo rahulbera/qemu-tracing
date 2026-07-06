@@ -10,6 +10,7 @@
 #   PLUGIN=<path>     champsim_tracer.so           (default: ../../plugin/champsim_tracer.so)
 #   VCPUS=<range>     vCPUs to trace               (default: 0)
 #   LIMIT=<N>         insns per vCPU               (default: 1000000000)
+#   ROTATE=<N>        raw chunk size in insns/vCPU (default: 100000000; 0=off)
 set -u
 
 GUEST_CFG="${1:?usage: configure_tracer.sh <guest_config.txt> [outdir]}"
