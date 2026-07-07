@@ -106,7 +106,9 @@ static uint8_t classify_arm64_branch(cs_insn *insn)
       return (insn->detail->arm64.cc == ARM64_CC_AL ||
               insn->detail->arm64.cc == ARM64_CC_INVALID) ? 1 : 3;
     case ARM64_INS_SVC: case ARM64_INS_HVC: case ARM64_INS_SMC:
-    case ARM64_INS_BRK: case ARM64_INS_ERET: return 7; /* BRANCH_OTHER */
+    case ARM64_INS_BRK: case ARM64_INS_ERET:
+    case ARM64_INS_HLT: case ARM64_INS_DCPS1: case ARM64_INS_DCPS2:
+    case ARM64_INS_DCPS3: case ARM64_INS_DRPS: return 7; /* BRANCH_OTHER */
     default: return 0; /* NOT_BRANCH */
   }
 }
@@ -167,6 +169,14 @@ decoded_regs_t decode_aarch64(const uint8_t *bytes, uint8_t size)
     } else if (op->type == ARM64_OP_MEM) {
       add_src(&o, map_arm64_register(op->mem.base));
       add_src(&o, map_arm64_register(op->mem.index));
+      /* Writeback addressing (e.g. STP [SP,#16]!, LDR [X1],#8) also WRITES
+       * the base register -- Capstone 4.0.2 does not report this in
+       * regs_write, so it must be derived from insn->detail->arm64.writeback
+       * (confirmed field: `bool writeback` in struct cs_arm64,
+       * /usr/include/capstone/arm64.h). Only the base is updated, never the
+       * index. Per spec S4.2: "a writeback base is read+write -> both." */
+      if (a->writeback)
+        add_dst(&o, map_arm64_register(op->mem.base));
     }
   }
 

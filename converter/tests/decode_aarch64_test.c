@@ -20,7 +20,7 @@
  * RET (c0035fd6) and NOP (1f2003d5, unused here) match the spec's stated
  * encodings.
  *
- * Prints "PASS n/12" and exits 0 iff every row passes; on any mismatch
+ * Prints "PASS n/14" and exits 0 iff every row passes; on any mismatch
  * prints expected vs actual for the failing row(s) and exits nonzero.
  *
  * IMPORTANT: the golden table (spec S5.1) is the oracle. decode_aarch64()
@@ -77,6 +77,15 @@ static const uint8_t LDR_dst[]      = { 64 };                  /* X0 */
 
 static const uint8_t STP_src[]      = { 64, 65, 6 };            /* X0, X1, SP */
 
+/* Writeback rows (FIX 1 regression cover): a writeback base register is
+ * read+write -- both src and dst. Only the base is written, never the
+ * index (LDR has no index operand here; base X1 is the one that moves). */
+static const uint8_t STP_WB_src[]   = { 64, 65, 6 };            /* X0, X1, SP */
+static const uint8_t STP_WB_dst[]   = { 6 };                    /* SP (writeback) */
+
+static const uint8_t LDR_WB_src[]   = { 65 };                   /* X1 */
+static const uint8_t LDR_WB_dst[]   = { 64, 65 };               /* X0, X1 (writeback) */
+
 static const uint8_t FADD_src[]     = { 97, 98 };               /* V1, V2 (S view) */
 static const uint8_t FADD_dst[]     = { 96 };                  /* V0 (S view) */
 
@@ -99,6 +108,10 @@ static const uint8_t ADDV_dst[]     = { 96 };                  /* V0 (4S view) *
  *   stp x0, x1, [sp, #16]      -> e0 07 01 a9
  *   fadd s0, s1, s2            -> 20 28 22 1e
  *   add v0.4s, v1.4s, v2.4s    -> 20 84 a2 4e
+ *
+ * Writeback rows (FIX 1), verified the same way:
+ *   stp x0, x1, [sp, #16]!     -> e0 07 81 a9   (pre-index writeback)
+ *   ldr x0, [x1], #8           -> 20 84 40 f8   (post-index writeback)
  */
 static const golden_row_t GOLDEN[] = {
   { "RET",                     {0xc0,0x03,0x5f,0xd6}, 6, INSTR_TYPE_INT,
@@ -121,6 +134,10 @@ static const golden_row_t GOLDEN[] = {
     LDR_src, 2, LDR_dst, 1 },
   { "STP X0,X1,[SP,#16]",       {0xe0,0x07,0x01,0xa9}, 0, INSTR_TYPE_INT,
     STP_src, 3, NULL, 0 },
+  { "STP X0,X1,[SP,#16]!",      {0xe0,0x07,0x81,0xa9}, 0, INSTR_TYPE_INT,
+    STP_WB_src, 3, STP_WB_dst, 1 },
+  { "LDR X0,[X1],#8",           {0x20,0x84,0x40,0xf8}, 0, INSTR_TYPE_INT,
+    LDR_WB_src, 1, LDR_WB_dst, 2 },
   { "FADD S0,S1,S2",            {0x20,0x28,0x22,0x1e}, 0, INSTR_TYPE_SIMD,
     FADD_src, 2, FADD_dst, 1 },
   { "ADD V0.4S,V1.4S,V2.4S",    {0x20,0x84,0xa2,0x4e}, 0, INSTR_TYPE_SIMD,
