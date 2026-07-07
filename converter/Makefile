@@ -37,7 +37,10 @@ CAPSTONE_LDFLAGS := $(shell pkg-config --libs capstone 2>/dev/null || echo "-lca
 
 OBJS = raw2champsim.o decode_x86.o decode_aarch64.o
 
-.PHONY: all clean distclean check-zstd check-capstone
+TESTS_DIR       = tests
+DECODE_TEST_BIN = $(TESTS_DIR)/decode_aarch64_test
+
+.PHONY: all clean distclean check-zstd check-capstone decode_test
 
 all: check-zstd check-capstone $(TARGET)
 
@@ -55,6 +58,17 @@ decode_x86.o: decode_x86.c decode.h $(ZYDIS_LIB) $(ZYCORE_LIB)
 
 decode_aarch64.o: decode_aarch64.c decode.h
 	$(CC) $(CFLAGS) $(CAPSTONE_CFLAGS) -c -o $@ $<
+
+# ── AArch64 golden unit test (spec S5.1) ─────
+#
+# Links decode_aarch64.o + Capstone directly -- no Zydis, no raw2champsim.o
+# needed, since the backend is self-complete.
+
+decode_test: check-capstone $(DECODE_TEST_BIN)
+
+$(DECODE_TEST_BIN): $(TESTS_DIR)/decode_aarch64_test.c decode_aarch64.o decode.h
+	$(CC) $(CFLAGS) $(CAPSTONE_CFLAGS) -o $@ $(TESTS_DIR)/decode_aarch64_test.c \
+		decode_aarch64.o $(CAPSTONE_LDFLAGS)
 
 # ── Zydis: clone and build if not present ────
 
@@ -97,7 +111,7 @@ check-capstone:
 # ── Cleanup ──────────────────────────────────
 
 clean:
-	rm -f $(TARGET) $(OBJS)
+	rm -f $(TARGET) $(OBJS) $(DECODE_TEST_BIN)
 
 distclean: clean
 	rm -rf $(ZYDIS_DIR)
