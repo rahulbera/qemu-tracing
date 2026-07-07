@@ -29,17 +29,21 @@ ZYDIS_INC     = -I$(ZYDIS_DIR)/include \
 ZSTD_CFLAGS  := $(shell pkg-config --cflags libzstd 2>/dev/null)
 ZSTD_LDFLAGS := $(shell pkg-config --libs libzstd 2>/dev/null || echo "-lzstd")
 
+# Capstone (system): AArch64 instruction decoder
+CAPSTONE_CFLAGS  := $(shell pkg-config --cflags capstone 2>/dev/null)
+CAPSTONE_LDFLAGS := $(shell pkg-config --libs capstone 2>/dev/null || echo "-lcapstone")
+
 # ─────────────────────────────────────────────
 
 OBJS = raw2champsim.o decode_x86.o decode_aarch64.o
 
-.PHONY: all clean distclean check-zstd
+.PHONY: all clean distclean check-zstd check-capstone
 
-all: check-zstd $(TARGET)
+all: check-zstd check-capstone $(TARGET)
 
 $(TARGET): $(OBJS) $(ZYDIS_LIB) $(ZYCORE_LIB)
 	$(CC) $(CFLAGS) $(ZSTD_CFLAGS) -o $@ $(OBJS) \
-		$(ZYDIS_LIB) $(ZYCORE_LIB) $(ZSTD_LDFLAGS)
+		$(ZYDIS_LIB) $(ZYCORE_LIB) $(ZSTD_LDFLAGS) $(CAPSTONE_LDFLAGS)
 	@echo ""
 	@echo "Built: $(TARGET)"
 
@@ -49,10 +53,8 @@ raw2champsim.o: raw2champsim.c decode.h
 decode_x86.o: decode_x86.c decode.h $(ZYDIS_LIB) $(ZYCORE_LIB)
 	$(CC) $(CFLAGS) $(ZYDIS_INC) -c -o $@ $<
 
-# decode_aarch64.o will additionally need $(CAPSTONE_CFLAGS) once the
-# real AArch64 decoder lands; harmless to omit while it's still a stub.
 decode_aarch64.o: decode_aarch64.c decode.h
-	$(CC) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CFLAGS) $(CAPSTONE_CFLAGS) -c -o $@ $<
 
 # ── Zydis: clone and build if not present ────
 
@@ -82,6 +84,14 @@ check-zstd:
 		 echo "  Ubuntu/Debian: sudo apt install libzstd-dev" && \
 		 echo "  Fedora/RHEL:   sudo dnf install libzstd-devel" && \
 		 echo "  macOS:         brew install zstd" && \
+		 exit 1)
+
+check-capstone:
+	@pkg-config --exists capstone 2>/dev/null || \
+		(echo "ERROR: libcapstone-dev not found. Install it:" && \
+		 echo "  Ubuntu/Debian: sudo apt install libcapstone-dev" && \
+		 echo "  Fedora/RHEL:   sudo dnf install capstone-devel" && \
+		 echo "  macOS:         brew install capstone" && \
 		 exit 1)
 
 # ── Cleanup ──────────────────────────────────

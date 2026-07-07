@@ -466,15 +466,7 @@ int main(int argc, char **argv)
     arch          = hdr_tail[0];
     file_has_pa   = (hdr_tail[1] & 0x1) != 0;
     file_has_vals = (hdr_tail[1] & 0x2) != 0;
-    if (arch == 1) {
-      fprintf(stderr,
-              "ERROR: arch=aarch64 — this converter decodes x86 only "
-              "(Zydis). AArch64 (Capstone) support is the next spec; see "
-              "docs/superpowers/specs/2026-07-06-aarch64-capture-kit-design.md\n");
-      reader_close(reader);
-      return 1;
-    }
-    if (arch != 0) {
+    if (arch != 0 && arch != 1) {
       fprintf(stderr,
               "ERROR: Unknown arch byte %u (supported: 0=x86_64, 1=aarch64)\n",
               arch);
@@ -485,8 +477,9 @@ int main(int argc, char **argv)
 
   printf("Input:   %s\n", input_file);
   printf("Output:  %s\n", output_file);
-  printf("Format:  v%u, vCPU %u, arch x86_64, PA %s\n",
-         version, vcpu_id, file_has_pa ? "captured" : "absent");
+  printf("Format:  v%u, vCPU %u, arch %s, PA %s\n",
+         version, vcpu_id, (arch == 1) ? "aarch64" : "x86_64",
+         file_has_pa ? "captured" : "absent");
   printf("Compression level: %d\n", ZSTD_COMP_LEVEL);
   printf("\n");
 
@@ -640,8 +633,8 @@ int main(int argc, char **argv)
     rec.ip        = ip;
     rec.privilege = priv;
 
-    /* Decode instruction (x86 via Zydis, or AArch64 stub) and copy the
-       resulting register sets into the record. */
+    /* Decode instruction (x86 via Zydis, AArch64 via Capstone) and copy
+       the resulting register sets into the record. */
     decoded_regs_t d = (arch == 1) ? decode_aarch64(insn_bytes, isz)
                                    : decode_x86(insn_bytes, isz);
     if (d.ok) {
