@@ -31,15 +31,28 @@ ZSTD_LDFLAGS := $(shell pkg-config --libs libzstd 2>/dev/null || echo "-lzstd")
 
 # ─────────────────────────────────────────────
 
+OBJS = raw2champsim.o decode_x86.o decode_aarch64.o
+
 .PHONY: all clean distclean check-zstd
 
 all: check-zstd $(TARGET)
 
-$(TARGET): raw2champsim.c $(ZYDIS_LIB) $(ZYCORE_LIB)
-	$(CC) $(CFLAGS) $(ZYDIS_INC) $(ZSTD_CFLAGS) -o $@ $< \
+$(TARGET): $(OBJS) $(ZYDIS_LIB) $(ZYCORE_LIB)
+	$(CC) $(CFLAGS) $(ZSTD_CFLAGS) -o $@ $(OBJS) \
 		$(ZYDIS_LIB) $(ZYCORE_LIB) $(ZSTD_LDFLAGS)
 	@echo ""
 	@echo "Built: $(TARGET)"
+
+raw2champsim.o: raw2champsim.c decode.h
+	$(CC) $(CFLAGS) $(ZSTD_CFLAGS) -c -o $@ $<
+
+decode_x86.o: decode_x86.c decode.h $(ZYDIS_LIB) $(ZYCORE_LIB)
+	$(CC) $(CFLAGS) $(ZYDIS_INC) -c -o $@ $<
+
+# decode_aarch64.o will additionally need $(CAPSTONE_CFLAGS) once the
+# real AArch64 decoder lands; harmless to omit while it's still a stub.
+decode_aarch64.o: decode_aarch64.c decode.h
+	$(CC) $(CFLAGS) -c -o $@ $<
 
 # ── Zydis: clone and build if not present ────
 
@@ -74,7 +87,7 @@ check-zstd:
 # ── Cleanup ──────────────────────────────────
 
 clean:
-	rm -f $(TARGET)
+	rm -f $(TARGET) $(OBJS)
 
 distclean: clean
 	rm -rf $(ZYDIS_DIR)
