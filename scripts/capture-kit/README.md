@@ -30,12 +30,15 @@ exact capture knobs used) so the traces are self-describing months
 later — you should never need to reconstruct how a capture was taken
 from memory.
 
-This kit is capture-side only. It does not decode AArch64 instructions
-or convert traces to ChampSim's format — `plugin/trace_filter` and
-`converter/raw2champsim` currently refuse AArch64 v3 files outright
-(offline AArch64 decode/conversion is the next project phase; see
-section 9). Your job here is to produce clean, validated `.raw.zst`
-files and the sidecar, then ship the whole output directory back.
+This kit is capture-side only — it does not itself decode AArch64
+instructions or convert traces to ChampSim's format. `converter/raw2champsim`
+now converts aarch64 v3 files (Capstone-based A64 decode; see
+`converter/README.md`). `plugin/trace_filter` is still x86-only —
+idle-loop filtering for AArch64 has not been built (see section 9). Your
+job here is to produce clean, validated `.raw.zst` files and the
+sidecar, then ship the whole output directory back (through the
+converter yourself, or to whoever runs it, if you want ChampSim traces
+rather than raw ones).
 
 ## 2. Requirements
 
@@ -518,10 +521,14 @@ without asking you to reconstruct how the capture was taken.
   default because they cannot be recovered after the fact. Full knob
   semantics (defaults, exact behavior, header-flag interaction) are in
   `plugin/README.md`.
-- **`plugin/trace_filter` or `converter/raw2champsim` refuse your
-  file.** Both intentionally hard-error on AArch64 v3 traces today
-  (`ERROR: arch=aarch64 — idle-loop filtering for AArch64 is not yet
-  supported` / `ERROR: arch=aarch64 — this converter decodes x86 only
-  (Zydis)`) — offline AArch64 decode and idle-loop filtering are the
-  next phase of this project, not yet built. This is expected; ship
-  the raw `.raw.zst` + `trace_metadata.txt` as-is (section 8).
+- **`plugin/trace_filter` refuses your file.** It still intentionally
+  hard-errors on AArch64 v3 traces (`ERROR: arch=aarch64 — idle-loop
+  filtering for AArch64 is not yet supported`) — idle-loop filtering for
+  AArch64 is not yet built. This is expected; ship the raw `.raw.zst`
+  unfiltered (section 8).
+- **`converter/raw2champsim` refuses your file.** This should no longer
+  happen — the converter now converts aarch64 v3 traces (Capstone-based
+  A64 decode; see `converter/README.md`). If you still see an error here,
+  it's a real problem (e.g. an unknown arch byte, a corrupt file, or a
+  converter/plugin version mismatch), not the old "not implemented"
+  refusal — report it rather than working around it.

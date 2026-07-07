@@ -122,8 +122,14 @@ realistic cross-socket sharing.
   guest arch. Collaborator entry point: `scripts/capture-kit/README.md`.
 - **Online raw rotation** (`rotate=N`) — see the Raw Trace Format
   section below; kit defaults it on at 100 M instructions/chunk.
-- Converter reads raw v2 and v3/x86_64 (PA passed through); v3/aarch64
-  decode (Capstone) + ChampSim AArch64 conventions are the next phase.
+- Converter reads raw v2, v3/x86_64, and v3/aarch64 (PA passed through
+  for all). AArch64 (A64) decode is implemented via Capstone 4.0.2 —
+  frozen register-ID scheme, LR-based call/return, `ERET`→OTHER, and the
+  rest of the conventions are documented in `converter/README.md` and
+  `docs/superpowers/specs/2026-07-07-raw2champsim-aarch64-design.md`.
+  What remains is the ChampSim **simulator-side** AArch64 configuration
+  (cache/uarch params, running the extended simulator on these traces)
+  — a separate, later phase.
 
 ## Current Blocker: kvmclock Snapshot Incompatibility
 
