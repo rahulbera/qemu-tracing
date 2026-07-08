@@ -79,18 +79,67 @@ MAX_PRINTED_VIOLATIONS = 50
 MAX_COLLECTED_VIOLATIONS = 200  # stop scanning after this many
 
 
-def open_records(path):
-    """Return the raw bytes of the trace, decompressing with the `zstd`
-    CLI if the path ends in .zst."""
+READ_BLOCK = 1 << 22   # 4 MiB reads; bounded memory regardless of trace size
+HEARTBEAT_RECORDS = 5_000_000   # progress line every 5M records
+
+
+def iter_records(path):
+    """Yield the trace's 512-byte records one at a time, STREAMING.
+
+    A converted 500M-instruction chunk is 500M x 512 B = ~256 GB
+    decompressed, so the trace must never be held in memory whole. We
+    read the `zstd -dc` (or file) stream in bounded blocks, buffering
+    only a partial trailing record across block boundaries. Any trailing
+    bytes that don't form a full record are reported and dropped, matching
+    the previous whole-file behavior.
+    """
     if path.endswith(".zst"):
-        proc = subprocess.run(["zstd", "-dc", path], stdout=subprocess.PIPE)
-        if proc.returncode != 0:
-            print(f"ERROR: `zstd -dc {path}` failed (exit {proc.returncode})",
-                  file=sys.stderr)
-            sys.exit(1)
-        return proc.stdout
-    with open(path, "rb") as f:
-        return f.read()
+        proc = subprocess.Popen(["zstd", "-dc", path], stdout=subprocess.PIPE)
+        stream = proc.stdout
+    else:
+        proc = None
+        stream = open(path, "rb")
+
+    buf = bytearray()
+    eof = False
+    try:
+        while True:
+            block = stream.read(READ_BLOCK)
+            if not block:
+                eof = True
+                break
+            buf.extend(block)
+            nfull = len(buf) // REC_SIZE
+            if nfull:
+                off = nfull * REC_SIZE
+                mv = memoryview(buf)
+                for k in range(nfull):
+                    yield bytes(mv[k * REC_SIZE:(k + 1) * REC_SIZE])
+                del mv
+                del buf[:off]
+        if buf:
+            print(f"WARNING: ignoring trailing {len(buf)} bytes "
+                  f"(not a multiple of {REC_SIZE})", file=sys.stderr)
+    finally:
+        # If the consumer stops early (e.g. violation cap), we may not have
+        # drained the stream — kill the decompressor rather than mistaking
+        # its SIGPIPE for a real failure. Only a clean EOF checks the code.
+        if proc is not None:
+            try:
+                stream.close()
+            except BrokenPipeError:
+                pass
+            if eof:
+                rc = proc.wait()
+                if rc != 0:
+                    print(f"ERROR: `zstd -dc {path}` failed (exit {rc})",
+                          file=sys.stderr)
+                    sys.exit(1)
+            else:
+                proc.kill()
+                proc.wait()
+        else:
+            stream.close()
 
 
 def parse_record(rec):
@@ -149,28 +198,15 @@ def main():
         sys.exit(2)
 
     path = sys.argv[1]
-    data = open_records(path)
-
-    if len(data) == 0:
-        print("ERROR: empty input", file=sys.stderr)
-        sys.exit(1)
-    if len(data) % REC_SIZE != 0:
-        print(f"WARNING: file size {len(data)} bytes is not a multiple of "
-              f"{REC_SIZE}; ignoring trailing {len(data) % REC_SIZE} bytes",
-              file=sys.stderr)
-
-    n = len(data) // REC_SIZE
-    if n == 0:
-        print("ERROR: no complete 512-byte records found", file=sys.stderr)
-        sys.exit(1)
 
     violations = []
+    n = 0
     n_branch = 0
     n_mem = 0
     n_simd = 0
 
-    for i in range(n):
-        rec = data[i * REC_SIZE:(i + 1) * REC_SIZE]
+    records = iter_records(path)
+    for rec in records:
         r = parse_record(rec)
 
         if r["is_branch"] != 0:
@@ -180,11 +216,23 @@ def main():
         if r["instr_type"] == 2:  # INSTR_TYPE_SIMD
             n_simd += 1
 
-        check_record(i, r, violations)
+        check_record(n, r, violations)
+        n += 1
+
+        if n % HEARTBEAT_RECORDS == 0:
+            print(f"[props] {n // 1_000_000}M records checked "
+                  f"({len(violations)} violation(s) so far)...",
+                  file=sys.stderr)
+            sys.stderr.flush()
 
         if len(violations) > MAX_COLLECTED_VIOLATIONS:
             violations.append("... (further violations suppressed)")
+            records.close()   # stop the decompressor; don't scan the rest
             break
+
+    if n == 0:
+        print("ERROR: no complete 512-byte records found", file=sys.stderr)
+        sys.exit(1)
 
     print(f"records:          {n}")
     print(f"branch fraction:  {n_branch}/{n} = {100.0 * n_branch / n:.4f}%")

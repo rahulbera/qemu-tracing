@@ -94,12 +94,20 @@ Usage:
 # Explicit output
 ./raw2champsim traces/trace_vcpu1.raw.zst /tmp/vcpu1.champsim.zst
 
-# Verbose progress (every 1 M instructions)
+# Verbose progress (detailed heartbeat every 1 M instructions)
 ./raw2champsim -v traces/trace_vcpu1.raw.zst
 
 # Convert only the first N instructions
 ./raw2champsim -n 1000000 traces/trace_vcpu1.raw.zst
 ```
+
+**Progress heartbeat.** Even without `-v`, the converter prints a
+one-line stderr heartbeat every **10 M instructions** (`-v` tightens it
+to every 1 M) — so a long per-chunk conversion (a 500 M-instruction
+chunk runs for minutes) shows a steady sign of life instead of looking
+hung. Heartbeats go to stderr and never touch the record stream or the
+stdout summary. The converter itself streams input→output, so its memory
+stays bounded regardless of chunk size.
 
 Zstd level is hard-coded to **19** (`ZSTD_COMP_LEVEL`) — this is the
 long-term-storage compression setting. Decompression cost is
@@ -239,7 +247,10 @@ Validation for the AArch64 backend, per
   on real output (e.g. every branch record has PC(26) in its
   destinations, every `is_branch∈{4,5}` has LR(94) in destinations,
   every `is_branch==6` has LR(94) in sources, all register IDs fall in
-  the frozen scheme).
+  the frozen scheme). It **streams** the trace (bounded ~20 MB of
+  memory regardless of size — a 500 M-record chunk is ~256 GB
+  decompressed, so it must never be read whole) and prints a stderr
+  heartbeat every 5 M records.
 - **`microbench.S`** + **`mix_stats.py`** + **`run_e2e.sh`** — an
   end-to-end validation: a freestanding, static A64 microbenchmark with
   a known instruction mix (call/return pair, conditional back-edge,

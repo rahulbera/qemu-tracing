@@ -14,7 +14,8 @@
  * Usage:
  *   ./raw2champsim [-v] [-n COUNT] <input.raw.zst> [output.champsim.zst]
  *
- *   -v         Verbose: print progress every 1M instructions
+ *   -v         Verbose: detailed progress every 1M instructions
+ *              (default heartbeat is every 10M instructions)
  *   -n COUNT   Convert only the first COUNT instructions
  *
  * If output is not specified, it is derived from input by replacing
@@ -706,9 +707,14 @@ int main(int argc, char **argv)
     prev_instr_size = isz;
     has_prev        = true;
 
-    /* Progress heartbeat every 1M instructions */
-    if (verbose && (stats.total_insns % 1000000) == 0) {
-      fprintf(stderr, "[heartbeat] %"PRIu64"M insns | "
+    /* Progress heartbeat. Coarse (every 10M insns) by DEFAULT so long
+       chunks show a steady sign of life instead of looking hung; fine
+       (every 1M) with -v. Always to stderr — never touches the record
+       stream or the stdout summary — and flushed so it appears promptly
+       in a redirected log. */
+    uint64_t hb_interval = verbose ? 1000000ULL : 10000000ULL;
+    if (stats.total_insns > 0 && (stats.total_insns % hb_interval) == 0) {
+      fprintf(stderr, "[raw2champsim] %"PRIu64"M insns | "
               "user %.1f%% kern %.1f%% | "
               "branch %.1f%% mem %.1f%% | "
               "decode_fail %"PRIu64" memop_overflow %"PRIu64" | "
@@ -721,6 +727,7 @@ int main(int argc, char **argv)
               stats.decode_failures,
               stats.mem_overflow,
               stats.type_int, stats.type_fp, stats.type_simd);
+      fflush(stderr);
     }
   }
 
